@@ -1,0 +1,4 @@
+{:paths ["src"]
+ :tasks {sync {:doc "Sync Linear issues to Todoist"
+               :task (do (require 'linear-todoist-sync.core)
+                        ((resolve 'linear-todoist-sync.core/run-sync!)))}}}

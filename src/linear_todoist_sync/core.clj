@@ -1,8 +1,6 @@
 (ns linear-todoist-sync.core
   (:require [babashka.http-client :as http]
             [cheshire.core :as json]
-            [com.wsscode.pathom3.interface.eql :as p.eql]
-            [com.wsscode.pathom3-graphql.connect :as p.gql]
             [clojure.string :as str]))
 
 ;; Configuration
@@ -10,57 +8,104 @@
   (-> "secrets.edn" slurp read-string))
 
 ;; Linear GraphQL Integration
-(defn linear-request-fn [api-key]
-  (fn [_env query]
-    (let [response (http/post "https://api.linear.app/graphql"
-                             {:headers {"Authorization" (str "Bearer " api-key)
-                                       "Content-Type" "application/json"}
-                              :body (json/generate-string {:query query})})]
-      (json/parse-string (:body response) true))))
+(defn query-linear! [api-key query]
+  (let [response (http/post "https://api.linear.app/graphql"
+                           {:headers {"Authorization" api-key
+                                     "Content-Type" "application/json"}
+                            :body (json/generate-string {:query query})})]
+    (json/parse-string (:body response) true)))
 
-(defn linear-env [api-key]
-  (-> {} (p.gql/connect-graphql {::p.gql/namespace "linear"} (linear-request-fn api-key))))
-
-(defn assigned-issues [env]
-  (let [data (p.eql/process env
-                           [{:linear.Query/viewer
-                             [{:assignedIssues
-                               [:id :title :description :url :createdAt :archivedAt
-                                {:state [:name :type]}
-                                {:children [:id :title :description :url :createdAt :archivedAt
-                                           {:state [:name :type]}]}]}]}])]
-    (get-in data [:linear.Query/viewer :assignedIssues])))
+(defn assigned-issues [api-key]
+  (let [query "query {
+                 viewer {
+                   assignedIssues(first: 100) {
+                     nodes {
+                       id
+                       title
+                       description
+                       url
+                       createdAt
+                       archivedAt
+                       priority
+                       priorityLabel
+                       branchName
+                       state {
+                         name
+                         type
+                       }
+                       cycle {
+                         id
+                         name
+                         startsAt
+                         endsAt
+                       }
+                       children {
+                         nodes {
+                           id
+                           title
+                           description
+                           url
+                           createdAt
+                           archivedAt
+                           priority
+                           priorityLabel
+                           branchName
+                           state {
+                             name
+                             type
+                           }
+                           cycle {
+                             id
+                             name
+                             startsAt
+                             endsAt
+                           }
+                         }
+                       }
+                     }
+                   }
+                 }
+               }"
+        result (query-linear! api-key query)
+        issues (get-in result [:data :viewer :assignedIssues :nodes])]
+    (println "Linear query returned" (count issues) "issues")
+    issues))
 
 ;; Todoist API Integration
-(defn sync-todoist! [api-key endpoint & [{:keys [method body]}]]
+(defn sync-todoist! [api-key & [{:keys [method body]}]]
   (let [response (http/request
-                  {:url (str "https://api.todoist.com/api/v1/" endpoint)
-                   :method (or method :get)
+                  {:uri "https://api.todoist.com/sync/v9/sync"
+                   :method (or method :post)
                    :headers {"Authorization" (str "Bearer " api-key)
                              "Content-Type" "application/json"}
                    :body (when body (json/generate-string body))})]
     (json/parse-string (:body response) true)))
 
+(defn fetch-rest-todoist! [api-key endpoint]
+  (let [response (http/get (str "https://api.todoist.com/rest/v2/" endpoint)
+                          {:headers {"Authorization" (str "Bearer " api-key)}})]
+    (json/parse-string (:body response) true)))
+
 (defn fetch-todoist-items! [api-key]
-  (:items (sync-todoist! api-key "sync"
-                        {:method :post
-                         :body {:sync_token "*" :resource_types ["items"]}})))
+  (let [result (sync-todoist! api-key
+                             {:body {:sync_token "*" :resource_types ["items"]}})
+        items (get result :items)]
+    (println "Todoist returned" (count items) "items")
+    items))
 
 (defn fetch-todoist-labels! [api-key]
-  (sync-todoist! api-key "labels"))
+  (fetch-rest-todoist! api-key "labels"))
 
 ;; Todoist command builders (pure functions)
-(defn from-linear-label-id [labels]
-  (:id (first (filter #(= "@from-linear" (:name %)) labels))))
-
-(defn add-item-command [content labels & [{:keys [parent-id]}]]
-  (let [label-id (from-linear-label-id labels)]
-    {:type "item_add"
-     :temp_id (str (random-uuid))
-     :uuid (str (random-uuid))
-     :args (cond-> {:content content}
-             label-id (assoc :labels [label-id])
-             parent-id (assoc :parent_id parent-id))}))
+(defn add-item-command [content description priority labels & [{:keys [parent-id]}]]
+  {:type "item_add"
+   :temp_id (str (random-uuid))
+   :uuid (str (random-uuid))
+   :args (cond-> {:content content
+                  :labels (concat ["from-linear"] labels)
+                  :priority priority}
+           description (assoc :description description)
+           parent-id (assoc :parent_id parent-id))})
 
 (defn complete-item-command [item-id]
   {:type "item_complete"
@@ -72,47 +117,70 @@
    :uuid (str (random-uuid))
    :args {:id item-id :content content}})
 
-(defn add-label-command [name]
-  {:type "label_add"
-   :temp_id (str (random-uuid))
-   :uuid (str (random-uuid))
-   :args {:name name}})
-
 ;; Execute Todoist commands (side effect)
 (defn execute-todoist-commands! [api-key commands]
   (when (seq commands)
-    (sync-todoist! api-key "sync"
-                  {:method :post
-                   :body {:commands commands}})))
-
-(defn ensure-from-linear-label! [api-key]
-  (let [labels (fetch-todoist-labels! api-key)
-        has-label? (some #(= "@from-linear" (:name %)) labels)]
-    (when-not has-label?
-      (execute-todoist-commands! api-key [(add-label-command "@from-linear")]))
-    (fetch-todoist-labels! api-key)))
+    (sync-todoist! api-key {:body {:commands commands}})))
 
 ;; Issue predicates and utilities
 (defn completed-issue? [issue]
   (or (= "completed" (get-in issue [:state :type]))
-      (some? (:archivedAt issue))))
+      (some? (get issue :archivedAt))))
+
+(defn in-current-cycle? [issue]
+  (let [cycle (get issue :cycle)]
+    (and cycle
+         (some? (get cycle :startsAt))
+         (some? (get cycle :endsAt)))))
+
+(defn linear-priority->todoist-priority [issue]
+  (let [priority (get issue :priority)
+        base-priority (case priority
+                       0 1  ; No priority -> p4 (lowest)
+                       1 2  ; Urgent -> p3
+                       2 3  ; High -> p2
+                       3 4  ; Medium -> p1 (highest in Todoist)
+                       1)]  ; Default fallback
+    (min 4 (+ base-priority (if (in-current-cycle? issue) 1 0)))))
 
 (defn task-content [issue]
-  (str (:title issue) " [" (:id issue) "]"))
+  (get issue :title))
 
-(defn extract-issue-id [task-content]
-  (when-let [match (re-find #"\[([^\]]+)\]$" task-content)]
+(defn task-description [issue]
+  (let [description (get issue :description)
+        url (get issue :url)
+        branch-name (get issue :branchName)
+        linear-id (get issue :id)
+        priority-label (get issue :priorityLabel)
+        cycle (get issue :cycle)
+        
+        linear-info [(when url (str "Linear Link: " url))
+                     (when branch-name (str "Linear Branch: " branch-name))
+                     (when priority-label (str "Linear Priority: " priority-label))
+                     (when cycle (str "Linear Cycle: " (get cycle :name)))
+                     (str "Linear ID: " linear-id)]
+        
+        metadata-section (->> linear-info
+                             (filter some?)
+                             (str/join "\n"))]
+    
+    (if description
+      (str description "\n\n" metadata-section)
+      metadata-section)))
+
+(defn extract-issue-id [task-description]
+  (when-let [match (re-find #"Linear ID: ([a-f0-9-]+)" (or task-description ""))]
     (second match)))
 
 (defn matching-task [issue tasks]
-  (let [issue-id (:id issue)]
-    (first (filter #(= issue-id (extract-issue-id (:content %))) tasks))))
+  (let [issue-id (get issue :id)]
+    (first (filter #(= issue-id (extract-issue-id (get % :description))) tasks))))
 
 ;; Issue expansion to include sub-issues
 (defn expand-issues [issues]
   (mapcat
    (fn [issue]
-     (let [sub-issues (:children issue)
+     (let [sub-issues (get-in issue [:children :nodes])
            main-issue (dissoc issue :children)]
        (if (seq sub-issues)
          (cons main-issue 
@@ -121,28 +189,37 @@
    issues))
 
 ;; Sync logic (pure functions)
-(defn sync-commands [issues tasks labels]
-  (let [expanded-issues (expand-issues issues)]
+(defn sync-commands [issues tasks config]
+  (let [expanded-issues (expand-issues issues)
+        additional-labels (get-in config [:config :additional-labels] [])]
     (mapcat
      (fn [issue]
        (let [existing-task (matching-task issue tasks)
              issue-completed? (completed-issue? issue)
              expected-content (task-content issue)
-             parent-task (when (:parent-issue issue)
-                          (matching-task (:parent-issue issue) tasks))]
+             priority (linear-priority->todoist-priority issue)
+             parent-task (when (get issue :parent-issue)
+                          (matching-task (get issue :parent-issue) tasks))]
          (cond
-           ;; Create new task
-           (nil? existing-task)
-           [(add-item-command expected-content labels 
-                             (when parent-task {:parent-id (:id parent-task)}))]
+           ;; Create new task (only if issue is not completed)
+           (and (nil? existing-task) (not issue-completed?))
+           [(add-item-command expected-content 
+                             (task-description issue)
+                             priority
+                             additional-labels
+                             (when parent-task {:parent-id (get parent-task :id)}))]
+           
+           ;; Skip if task doesn't exist but issue is already completed
+           (and (nil? existing-task) issue-completed?)
+           []
            
            ;; Complete task if issue is completed but task isn't
-           (and issue-completed? (not (:checked existing-task)))
-           [(complete-item-command (:id existing-task))]
+           (and issue-completed? (not (get existing-task :checked)))
+           [(complete-item-command (get existing-task :id))]
            
            ;; Update task content if changed
-           (not= expected-content (:content existing-task))
-           [(update-item-command (:id existing-task) expected-content)]
+           (not= expected-content (get existing-task :content))
+           [(update-item-command (get existing-task :id) expected-content)]
            
            ;; No changes needed
            :else
@@ -151,12 +228,15 @@
 
 ;; Main orchestration
 (defn run-sync! []
-  (let [{:keys [linear todoist]} (secrets)
-        env (linear-env (:api-key linear))
-        issues (assigned-issues env)
+  (let [config (secrets)
+        {:keys [linear todoist]} config
+        issues (assigned-issues (:api-key linear))
         tasks (fetch-todoist-items! (:api-key todoist))
-        labels (ensure-from-linear-label! (:api-key todoist))
-        commands (sync-commands issues tasks labels)]
+        commands (sync-commands issues tasks config)]
+    
+    (println "Found" (count issues) "Linear issues")
+    (println "Found" (count tasks) "Todoist tasks")
+    (println "Generated" (count commands) "commands")
     
     (if (seq commands)
       (do
