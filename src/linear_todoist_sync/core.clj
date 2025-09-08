@@ -220,7 +220,7 @@
     (min 4
          (if (in-current-cycle? issue)
            (inc base-priority)
-           base-priority)))))
+           base-priority))))
 
 (defn task-content [issue]
   (get issue :title))
@@ -315,7 +315,7 @@
 ;; Sync logic (pure functions)
 (defn sync-commands [issues tasks config]
   (let [expanded-issues (expand-issues issues)
-        additional-labels (get-in config [:config :additional-labels] [])
+        additional-labels (get config :additional-labels [])
         issue-cmds (mapcat #(issue-sync-commands % tasks additional-labels) expanded-issues)
         reassignment-cmds (reassignment-commands issues tasks)]
     (concat issue-cmds reassignment-cmds)))
@@ -371,7 +371,7 @@
         {:keys [linear todoist]} secrets-config
         issues (assigned-issues (:api-key linear))
         tasks (fetch-todoist-items! (:api-key todoist))
-        sync-cmds (sync-commands issues tasks secrets-config)
+        sync-cmds (sync-commands issues tasks app-config)
         llm-cmds (if skip-llm? [] (llm-label-commands tasks issues app-config))
         commands (concat sync-cmds llm-cmds)]
     

@@ -75,14 +75,14 @@ They all do what they look like they do.
 **secrets.edn** (required):
 ```clojure
 {:linear {:api-key "lin_api_..."}
- :todoist {:api-key "..."}
- ;; Additional labels you might want to add to every single imported task
- :config {:additional-labels ["work"]}}
+ :todoist {:api-key "..."}}
 ```
 
-**config.edn** (optional, for LLM):
+**config.edn** (optional):
 ```clojure
-{:llm {:enabled true
+{;; Additional labels you might want to add to every single imported task
+ :additional-labels ["work"]
+ :llm {:enabled true
        :base-url "http://127.0.0.1:1234/v1"
        :model "awesomeness-classifier-2507"
        :prompt "Is this task awesome?"
