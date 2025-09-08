@@ -1,4 +1,4 @@
-{:llm {:enabled true
+{:llm {:enabled false
        :base-url "http://127.0.0.1:1234/v1"
        :model "qwen/qwen3-4b-thinking-2507"
        :timeout 120000
