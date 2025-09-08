@@ -1,11 +1,63 @@
 (ns linear-todoist-sync.core
   (:require [babashka.http-client :as http]
+            [babashka.cli :as cli]
             [cheshire.core :as json]
             [clojure.string :as str]))
 
-;; Configuration
 (defn secrets []
   (-> "secrets.edn" slurp read-string))
+
+(defn config []
+  (try
+    (-> "config.edn" slurp read-string)
+    (catch Exception _
+      {:llm {:enabled false}})))
+
+(defn load-llm-cache []
+  (try
+    (-> ".llm-cache.edn" slurp read-string)
+    (catch Exception _
+      #{})))
+
+(defn save-llm-cache! [cache]
+  (spit ".llm-cache.edn" (pr-str cache)))
+
+(defn llm-request! [base-url model prompt opts]
+  (try
+    (let [payload {:stream false
+                   :model model
+                   :messages [{:role "user" :content prompt}]}
+          url (str base-url "/chat/completions")
+          payload-json (json/generate-string payload)
+          result (babashka.process/shell {:out :string}
+                                        "curl" "-s" "-X" "POST" url
+                                        "-H" "Content-Type: application/json"
+                                        "-d" payload-json)]
+      (if (= 0 (:exit result))
+        (let [response (json/parse-string (:out result) true)]
+          (get-in response [:choices 0 :message :content]))
+        (do (println "Curl failed with exit code:" (:exit result))
+            (println "Error:" (:err result))
+            nil)))
+    (catch Exception e
+      (println "LLM request failed:" (.getMessage e))
+      nil)))
+
+(defn evaluate-task-with-llm [task {:keys [base-url model prompt] :as llm-config}]
+  (let [filled-prompt (-> prompt
+                        (str/replace "{task-content}" (:content task ""))
+                        (str/replace "{task-description}" (:description task "")))
+        reasoning (llm-request! base-url model filled-prompt 
+                               {:max_tokens 200 :temperature 0.1})
+        json-prompt (str reasoning "\n\nAnswer with JSON: {\"answer_is_yes\": true/false}")
+        result (llm-request! base-url model json-prompt 
+                            {:max_tokens 50 :temperature 0.0})]
+    
+    (when (and reasoning result)
+      (try
+        (:answer_is_yes (json/parse-string result true))
+        (catch Exception _
+          (str/includes? (str/lower-case result) "true"))))))
 
 ;; Linear GraphQL Integration
 (defn query-linear! [api-key query]
@@ -18,7 +70,7 @@
 (defn assigned-issues [api-key]
   (let [query "query {
                  viewer {
-                   assignedIssues(first: 100) {
+                   assignedIssues(first: 100, includeArchived: true) {
                      nodes {
                        id
                        title
@@ -71,7 +123,6 @@
     (println "Linear query returned" (count issues) "issues")
     issues))
 
-;; Todoist API Integration
 (defn sync-todoist! [api-key & [{:keys [method body]}]]
   (let [response (http/request
                   {:uri "https://api.todoist.com/sync/v9/sync"
@@ -96,7 +147,6 @@
 (defn fetch-todoist-labels! [api-key]
   (fetch-rest-todoist! api-key "labels"))
 
-;; Todoist command builders (pure functions)
 (defn add-item-command [content description priority labels & [{:keys [parent-id]}]]
   {:type "item_add"
    :temp_id (str (random-uuid))
@@ -117,15 +167,22 @@
    :uuid (str (random-uuid))
    :args {:id item-id :content content}})
 
-;; Execute Todoist commands (side effect)
+(defn add-labels-command [item-id labels]
+  {:type "item_update"
+   :uuid (str (random-uuid))
+   :args {:id item-id :labels labels}})
+
 (defn execute-todoist-commands! [api-key commands]
   (when (seq commands)
     (sync-todoist! api-key {:body {:commands commands}})))
 
-;; Issue predicates and utilities
 (defn completed-issue? [issue]
-  (or (= "completed" (get-in issue [:state :type]))
-      (some? (get issue :archivedAt))))
+  (let [state-type (get-in issue [:state :type])
+        archived-at (get issue :archivedAt)]
+    (or (case state-type
+          ("completed" "canceled") true
+          false)
+        (some? archived-at))))
 
 (defn in-current-cycle? [issue]
   (let [cycle (get issue :cycle)]
@@ -136,12 +193,16 @@
 (defn linear-priority->todoist-priority [issue]
   (let [priority (get issue :priority)
         base-priority (case priority
-                       0 1  ; No priority -> p4 (lowest)
-                       1 2  ; Urgent -> p3
+                       0 1  ; None -> p4 (normal/default)
+                       1 4  ; Urgent -> p1 (very urgent) 
                        2 3  ; High -> p2
-                       3 4  ; Medium -> p1 (highest in Todoist)
+                       3 2  ; Normal -> p3
+                       4 1  ; Low -> p4
                        1)]  ; Default fallback
-    (min 4 (+ base-priority (if (in-current-cycle? issue) 1 0)))))
+    (min 4
+         (if (in-current-cycle? issue)
+           (inc base-priority)
+           base-priority)))))
 
 (defn task-content [issue]
   (get issue :title))
@@ -188,61 +249,118 @@
          [main-issue])))
    issues))
 
+(defn issue-sync-commands [issue tasks additional-labels]
+  (let [existing-task (matching-task issue tasks)
+        issue-completed? (completed-issue? issue)
+        expected-content (task-content issue)
+        priority (linear-priority->todoist-priority issue)
+        parent-task (when (get issue :parent-issue)
+                     (matching-task (get issue :parent-issue) tasks))]
+    (cond
+      ;; Create new task (only if issue is not completed)
+      (and (nil? existing-task) (not issue-completed?))
+      [(add-item-command expected-content 
+                        (task-description issue)
+                        priority
+                        additional-labels
+                        (when parent-task {:parent-id (get parent-task :id)}))]
+      
+      ;; Skip if task doesn't exist but issue is already completed
+      (and (nil? existing-task) issue-completed?)
+      []
+      
+      ;; Complete task if issue is completed but task isn't
+      (and issue-completed? (not (get existing-task :checked)))
+      [(complete-item-command (get existing-task :id))]
+      
+      ;; Update task content if changed
+      (not= expected-content (get existing-task :content))
+      [(update-item-command (get existing-task :id) expected-content)]
+      
+      ;; No changes needed
+      :else
+      [])))
+
+(defn reassignment-commands [issues tasks]
+  (let [current-issue-ids (set (map :id issues))
+        reassigned-tasks (->> tasks
+                             (filter #(extract-issue-id (:description %)))
+                             (remove #(contains? current-issue-ids 
+                                               (extract-issue-id (:description %))))
+                             (remove :checked))]
+    (mapcat (fn [task]
+              [(update-item-command (:id task) 
+                                  (str "REASSIGNED: " (:content task)))
+               (complete-item-command (:id task))])
+            reassigned-tasks)))
+
 ;; Sync logic (pure functions)
 (defn sync-commands [issues tasks config]
   (let [expanded-issues (expand-issues issues)
-        additional-labels (get-in config [:config :additional-labels] [])]
-    (mapcat
-     (fn [issue]
-       (let [existing-task (matching-task issue tasks)
-             issue-completed? (completed-issue? issue)
-             expected-content (task-content issue)
-             priority (linear-priority->todoist-priority issue)
-             parent-task (when (get issue :parent-issue)
-                          (matching-task (get issue :parent-issue) tasks))]
-         (cond
-           ;; Create new task (only if issue is not completed)
-           (and (nil? existing-task) (not issue-completed?))
-           [(add-item-command expected-content 
-                             (task-description issue)
-                             priority
-                             additional-labels
-                             (when parent-task {:parent-id (get parent-task :id)}))]
-           
-           ;; Skip if task doesn't exist but issue is already completed
-           (and (nil? existing-task) issue-completed?)
-           []
-           
-           ;; Complete task if issue is completed but task isn't
-           (and issue-completed? (not (get existing-task :checked)))
-           [(complete-item-command (get existing-task :id))]
-           
-           ;; Update task content if changed
-           (not= expected-content (get existing-task :content))
-           [(update-item-command (get existing-task :id) expected-content)]
-           
-           ;; No changes needed
-           :else
-           [])))
-     expanded-issues)))
+        additional-labels (get-in config [:config :additional-labels] [])
+        issue-cmds (mapcat #(issue-sync-commands % tasks additional-labels) expanded-issues)
+        reassignment-cmds (reassignment-commands issues tasks)]
+    (concat issue-cmds reassignment-cmds)))
 
-;; Main orchestration
-(defn run-sync! []
-  (let [config (secrets)
-        {:keys [linear todoist]} config
+(defn llm-label-commands [tasks issues {:keys [llm] :as config}]
+  (if-not (:enabled llm)
+    []
+    (let [{:keys [labels-to-add]} llm
+          issues-by-id (zipmap (map :id issues) issues)
+          llm-cache (load-llm-cache)
+          eligible-tasks (->> tasks
+                             (filter #(not (:checked %)))
+                             (filter #(extract-issue-id (:description %)))
+                             (remove #(when-let [issue-id (extract-issue-id (:description %))]
+                                       (when-let [issue (get issues-by-id issue-id)]
+                                         (completed-issue? issue))))
+                             (remove #(some (set (:labels %)) labels-to-add))
+                             (remove #(contains? llm-cache (:id %))))]
+      (println "Evaluating" (count eligible-tasks) "tasks with LLM...")
+      (loop [remaining eligible-tasks
+             processed 0
+             commands []
+             cache llm-cache]
+        (if (empty? remaining)
+          (do (save-llm-cache! cache)
+              commands)
+          (let [task (first remaining)
+                task-id (:id task)
+                task-title (subs (:content task) 0 (min 50 (count (:content task))))
+                progress-str (str "[" (inc processed) "/" (count eligible-tasks) "]")]
+            (print (str progress-str " " task-title "... "))
+            (flush)
+            (if (evaluate-task-with-llm task llm)
+              (do (println "✓" (str/join "/" labels-to-add))
+                  (recur (rest remaining) 
+                         (inc processed)
+                         (conj commands (add-labels-command task-id 
+                                                           (vec (concat (:labels task) labels-to-add))))
+                         (conj cache task-id)))
+              (do (println "✗ skip")
+                  (recur (rest remaining) (inc processed) commands (conj cache task-id))))))))))
+
+(defn run-sync! [& args]
+  (let [opts (cli/parse-opts args {:spec {:skip-llm {:desc "Skip LLM processing"}}})
+        skip-llm? (:skip-llm opts)
+        secrets-config (secrets)
+        app-config (config)
+        {:keys [linear todoist]} secrets-config
         issues (assigned-issues (:api-key linear))
         tasks (fetch-todoist-items! (:api-key todoist))
-        commands (sync-commands issues tasks config)]
+        sync-cmds (sync-commands issues tasks secrets-config)
+        llm-cmds (if skip-llm? [] (llm-label-commands tasks issues app-config))
+        commands (concat sync-cmds llm-cmds)]
     
     (println "Found" (count issues) "Linear issues")
     (println "Found" (count tasks) "Todoist tasks")
-    (println "Generated" (count commands) "commands")
+    (if skip-llm?
+      (println "Generated" (count commands) "sync commands (LLM skipped)")
+      (println "Generated" (count commands) "total commands"))
     
     (if (seq commands)
-      (do
-        (println "Executing" (count commands) "commands...")
-        (execute-todoist-commands! (:api-key todoist) commands)
-        (println "Sync completed!"))
+      (do (execute-todoist-commands! (:api-key todoist) commands)
+          (println "Sync completed!"))
       (println "No changes needed."))))
 
 (defn -main [& args]

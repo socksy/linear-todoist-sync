@@ -1,0 +1,35 @@
+{:llm {:enabled true
+       :base-url "http://127.0.0.1:1234/v1"
+       :model "qwen/qwen3-4b-thinking-2507"
+       :timeout 120000
+       :labels-to-add ["next"]
+       :prompt "I have the following task:
+
+```
+{task-content}
+
+{task-description}
+```
+
+Please answer with either \"yes\" or \"no\" — does this task, with the current description and with reasonable interpretation from an average programmer, classify as a \"next action\", in the sense of GTD/Getting Things Done?
+
+A Next Action should be:
+- A specific, concrete physical action
+- Clear about what exactly needs to be done
+- Actionable right now without dependencies
+- Not vague or abstract
+
+Examples of Next Actions:
+- \"Call caterer to confirm menu\"
+- \"Email John about Q3 report\"  
+- \"Draft agenda for team meeting\"
+- \"Research competitor websites for design inspiration\"
+- \"Take out trash bags to the curb\"
+
+What is NOT a Next Action:
+- Vague tasks: \"Think about marketing strategy\" or \"Improve website\"
+- Projects: \"Organize garage\" (instead: \"Sort garage items into keep/donate/trash piles\")
+- Waiting tasks: \"Wait for Sarah's approval\" (instead: \"Email Sarah to ask for approval\")
+- Tasks requiring prerequisites: \"Deploy to production\" when code isn't ready
+
+Consider the task content and description. Does this specify a clear, actionable next step that could be started immediately?"}}
