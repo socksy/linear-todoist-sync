@@ -5,7 +5,11 @@
             [clojure.string :as str]))
 
 (defn secrets []
-  (-> "secrets.edn" slurp read-string))
+  (try
+    (-> "secrets.edn" slurp read-string)
+    (catch Exception _
+      (println "Error: secrets.edn not found. Copy secrets.edn.example and add your API keys.")
+      (System/exit 1))))
 
 (defn config []
   (try
@@ -61,11 +65,18 @@
 
 ;; Linear GraphQL Integration
 (defn query-linear! [api-key query]
-  (let [response (http/post "https://api.linear.app/graphql"
-                           {:headers {"Authorization" api-key
-                                     "Content-Type" "application/json"}
-                            :body (json/generate-string {:query query})})]
-    (json/parse-string (:body response) true)))
+  (try
+    (let [response (http/post "https://api.linear.app/graphql"
+                             {:headers {"Authorization" api-key
+                                       "Content-Type" "application/json"}
+                              :body (json/generate-string {:query query})})]
+      (if (= 200 (:status response))
+        (json/parse-string (:body response) true)
+        (do (println "Linear API error:" (:status response) (:body response))
+            (System/exit 1))))
+    (catch Exception e
+      (println "Failed to connect to Linear API:" (.getMessage e))
+      (System/exit 1))))
 
 (defn assigned-issues [api-key]
   (let [query "query {
@@ -124,13 +135,20 @@
     issues))
 
 (defn sync-todoist! [api-key & [{:keys [method body]}]]
-  (let [response (http/request
-                  {:uri "https://api.todoist.com/sync/v9/sync"
-                   :method (or method :post)
-                   :headers {"Authorization" (str "Bearer " api-key)
-                             "Content-Type" "application/json"}
-                   :body (when body (json/generate-string body))})]
-    (json/parse-string (:body response) true)))
+  (try
+    (let [response (http/request
+                    {:uri "https://api.todoist.com/sync/v9/sync"
+                     :method (or method :post)
+                     :headers {"Authorization" (str "Bearer " api-key)
+                               "Content-Type" "application/json"}
+                     :body (when body (json/generate-string body))})]
+      (if (< (:status response) 400)
+        (json/parse-string (:body response) true)
+        (do (println "Todoist API error:" (:status response) (:body response))
+            (System/exit 1))))
+    (catch Exception e
+      (println "Failed to connect to Todoist API:" (.getMessage e))
+      (System/exit 1))))
 
 (defn fetch-rest-todoist! [api-key endpoint]
   (let [response (http/get (str "https://api.todoist.com/rest/v2/" endpoint)
@@ -341,8 +359,13 @@
                   (recur (rest remaining) (inc processed) commands (conj cache task-id))))))))))
 
 (defn run-sync! [& args]
-  (let [opts (cli/parse-opts args {:spec {:skip-llm {:desc "Skip LLM processing"}}})
+  (let [opts (cli/parse-opts args {:spec {:skip-llm {:desc "Skip LLM processing"}
+                                          :dry-run {:desc "Show what would be done without executing"}
+                                          :verbose {:desc "Show detailed output"}
+                                          :config {:desc "Path to config file" :default "config.edn"}}})
         skip-llm? (:skip-llm opts)
+        dry-run? (:dry-run opts)
+        verbose? (:verbose opts)
         secrets-config (secrets)
         app-config (config)
         {:keys [linear todoist]} secrets-config
@@ -359,8 +382,13 @@
       (println "Generated" (count commands) "total commands"))
     
     (if (seq commands)
-      (do (execute-todoist-commands! (:api-key todoist) commands)
-          (println "Sync completed!"))
+      (if dry-run?
+        (do (println "\nDry run - would execute" (count commands) "commands:")
+            (when verbose?
+              (doseq [cmd commands]
+                (println " " (:type cmd) (:args cmd)))))
+        (do (execute-todoist-commands! (:api-key todoist) commands)
+            (println "Sync completed!")))
       (println "No changes needed."))))
 
 (defn -main [& args]
