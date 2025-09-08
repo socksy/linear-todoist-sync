@@ -131,7 +131,6 @@
                }"
         result (query-linear! api-key query)
         issues (get-in result [:data :viewer :assignedIssues :nodes])]
-    (println "Linear query returned" (count issues) "issues")
     issues))
 
 (defn sync-todoist! [api-key & [{:keys [method body]}]]
@@ -159,7 +158,6 @@
   (let [result (sync-todoist! api-key
                              {:body {:sync_token "*" :resource_types ["items"]}})
         items (get result :items)]
-    (println "Todoist returned" (count items) "items")
     items))
 
 (defn fetch-todoist-labels! [api-key]
@@ -320,7 +318,7 @@
         reassignment-cmds (reassignment-commands issues tasks)]
     (concat issue-cmds reassignment-cmds)))
 
-(defn llm-label-commands [tasks issues {:keys [llm] :as config}]
+(defn llm-label-commands [tasks issues {:keys [llm] :as config} & [verbose?]]
   (if-not (:enabled llm)
     []
     (let [{:keys [labels-to-add]} llm
@@ -334,7 +332,7 @@
                                          (completed-issue? issue))))
                              (remove #(some (set (:labels %)) labels-to-add))
                              (remove #(contains? llm-cache (:id %))))]
-      (println "Evaluating" (count eligible-tasks) "tasks with LLM...")
+      (when verbose? (println "Evaluating" (count eligible-tasks) "tasks with LLM..."))
       (loop [remaining eligible-tasks
              processed 0
              commands []
@@ -358,12 +356,12 @@
               (do (println "✗ skip")
                   (recur (rest remaining) (inc processed) commands (conj cache task-id))))))))))
 
-(defn run-sync! [& args]
-  (let [opts (cli/parse-opts args {:spec {:skip-llm {:desc "Skip LLM processing"}
-                                          :dry-run {:desc "Show what would be done without executing"}
-                                          :verbose {:desc "Show detailed output"}
-                                          :config {:desc "Path to config file" :default "config.edn"}}})
-        skip-llm? (:skip-llm opts)
+(defn show-help
+  [spec]
+  (cli/format-opts (merge spec {:order (vec (keys (:spec spec)))})))
+
+(defn run-sync! [opts]
+  (let [skip-llm? (:skip-llm opts)
         dry-run? (:dry-run opts)
         verbose? (:verbose opts)
         secrets-config (secrets)
@@ -372,11 +370,12 @@
         issues (assigned-issues (:api-key linear))
         tasks (fetch-todoist-items! (:api-key todoist))
         sync-cmds (sync-commands issues tasks app-config)
-        llm-cmds (if skip-llm? [] (llm-label-commands tasks issues app-config))
+        llm-cmds (if skip-llm? [] (llm-label-commands tasks issues app-config verbose?))
         commands (concat sync-cmds llm-cmds)]
     
-    (println "Found" (count issues) "Linear issues")
-    (println "Found" (count tasks) "Todoist tasks")
+    (when verbose?
+      (println "Found" (count issues) "Linear issues")
+      (println "Found" (count tasks) "Todoist tasks"))
     (if skip-llm?
       (println "Generated" (count commands) "sync commands (LLM skipped)")
       (println "Generated" (count commands) "total commands"))
@@ -392,4 +391,18 @@
       (println "No changes needed."))))
 
 (defn -main [& args]
-  (run-sync!))
+  (let [spec {:spec {:skip-llm {:desc "Skip LLM processing"}
+                     :dry-run {:desc "Show what would be done without executing"}
+                     :verbose {:desc "Show detailed output"}
+                     :config {:desc "Path to config file" :default "config.edn"}
+                     :help {:desc "Show this help"}}}
+        opts (if (and (= 1 (count args)) (map? (first args)))
+               (first args) ; Already parsed by babashka
+               (cli/parse-opts args spec))]
+    (if (:help opts)
+      (do (println "Linear to Todoist Sync")
+          (println)
+          (println "Usage: bb sync [options]")
+          (println)
+          (println (show-help spec)))
+      (run-sync! opts))))

@@ -56,6 +56,7 @@ bb sync
 bb sync --skip-llm
 bb sync --dry-run
 bb sync --verbose
+bb sync --help
 ```
 
 They all do what they look like they do.
