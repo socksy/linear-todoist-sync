@@ -13,10 +13,16 @@
             src = ./.;
             buildInputs = [ pkgs.babashka ];
             installPhase = ''
-              mkdir -p $out/bin
-              cp -r . $out/
-              echo '#!/usr/bin/env bash' > $out/bin/linear-todoist-sync
-              echo "cd $out && ${pkgs.babashka}/bin/bb sync \"\$@\"" >> $out/bin/linear-todoist-sync
+              mkdir -p $out/bin $out/share/linear-todoist-sync
+              cp -r src bb.edn $out/share/linear-todoist-sync/
+              cp *.example $out/share/linear-todoist-sync/
+              
+              cat > $out/bin/linear-todoist-sync << EOF
+              #!/usr/bin/env bash
+              ORIGINAL_PWD="\$(pwd)"
+              cd "$out/share/linear-todoist-sync"
+              exec ${pkgs.babashka}/bin/bb sync --work-dir "\$ORIGINAL_PWD" "\$@"
+              EOF
               chmod +x $out/bin/linear-todoist-sync
             '';
           };

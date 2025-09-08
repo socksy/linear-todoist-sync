@@ -4,27 +4,37 @@
             [cheshire.core :as json]
             [clojure.string :as str]))
 
-(defn secrets []
-  (try
-    (-> "secrets.edn" slurp read-string)
-    (catch Exception _
-      (println "Error: secrets.edn not found. Copy secrets.edn.example and add your API keys.")
-      (System/exit 1))))
+(defn secrets [& [work-dir]]
+  (let [path (if work-dir (str work-dir "/secrets.edn") "secrets.edn")]
+    (try
+      (-> path slurp read-string)
+      (catch Exception _
+        (println "Error: secrets.edn not found. Copy secrets.edn.example and add your API keys.")
+        (System/exit 1)))))
 
-(defn config []
-  (try
-    (-> "config.edn" slurp read-string)
-    (catch Exception _
-      {:llm {:enabled false}})))
+(defn config [& [work-dir]]
+  (if-let [found-path (first (filter #(.exists (java.io.File. %)) 
+                                     (if work-dir
+                                       [(str work-dir "/config.edn") 
+                                        (str work-dir "/config.edn.example")]
+                                       ["config.edn" "config.edn.example"])))]
+    (try
+      (-> found-path slurp read-string)
+      (catch Exception e
+        (println "Error reading" found-path ":" (.getMessage e))
+        {:llm {:enabled false}}))
+    {:llm {:enabled false}}))
 
-(defn load-llm-cache []
-  (try
-    (-> ".llm-cache.edn" slurp read-string)
-    (catch Exception _
-      #{})))
+(defn load-llm-cache [& [work-dir]]
+  (let [path (if work-dir (str work-dir "/.llm-cache.edn") ".llm-cache.edn")]
+    (try
+      (-> path slurp read-string)
+      (catch Exception _
+        #{}))))
 
-(defn save-llm-cache! [cache]
-  (spit ".llm-cache.edn" (pr-str cache)))
+(defn save-llm-cache! [cache & [work-dir]]
+  (spit (if work-dir (str work-dir "/.llm-cache.edn") ".llm-cache.edn")
+        (pr-str cache)))
 
 (defn llm-request! [base-url model prompt opts]
   (try
@@ -38,8 +48,10 @@
                                         "-H" "Content-Type: application/json"
                                         "-d" payload-json)]
       (if (= 0 (:exit result))
-        (let [response (json/parse-string (:out result) true)]
-          (get-in response [:choices 0 :message :content]))
+        (-> result
+            :out 
+            (json/parse-string true)
+            (get-in [:choices 0 :message :content]))
         (do (println "Curl failed with exit code:" (:exit result))
             (println "Error:" (:err result))
             nil)))
@@ -318,12 +330,12 @@
         reassignment-cmds (reassignment-commands issues tasks)]
     (concat issue-cmds reassignment-cmds)))
 
-(defn llm-label-commands [tasks issues {:keys [llm] :as config} & [verbose?]]
+(defn llm-label-commands [tasks issues {:keys [llm] :as config} & [verbose? work-dir]]
   (if-not (:enabled llm)
     []
     (let [{:keys [labels-to-add]} llm
           issues-by-id (zipmap (map :id issues) issues)
-          llm-cache (load-llm-cache)
+          llm-cache (load-llm-cache work-dir)
           eligible-tasks (->> tasks
                              (filter #(not (:checked %)))
                              (filter #(extract-issue-id (:description %)))
@@ -338,7 +350,7 @@
              commands []
              cache llm-cache]
         (if (empty? remaining)
-          (do (save-llm-cache! cache)
+          (do (save-llm-cache! cache work-dir)
               commands)
           (let [task (first remaining)
                 task-id (:id task)
@@ -364,13 +376,14 @@
   (let [skip-llm? (:skip-llm opts)
         dry-run? (:dry-run opts)
         verbose? (:verbose opts)
-        secrets-config (secrets)
-        app-config (config)
+        work-dir (:work-dir opts)
+        secrets-config (secrets work-dir)
+        app-config (config work-dir)
         {:keys [linear todoist]} secrets-config
         issues (assigned-issues (:api-key linear))
         tasks (fetch-todoist-items! (:api-key todoist))
         sync-cmds (sync-commands issues tasks app-config)
-        llm-cmds (if skip-llm? [] (llm-label-commands tasks issues app-config verbose?))
+        llm-cmds (if skip-llm? [] (llm-label-commands tasks issues app-config verbose? work-dir))
         commands (concat sync-cmds llm-cmds)]
     
     (when verbose?
@@ -394,7 +407,7 @@
   (let [spec {:spec {:skip-llm {:desc "Skip LLM processing"}
                      :dry-run {:desc "Show what would be done without executing"}
                      :verbose {:desc "Show detailed output"}
-                     :config {:desc "Path to config file" :default "config.edn"}
+                     :work-dir {:desc "Working directory for config files"}
                      :help {:desc "Show this help"}}}
         opts (if (and (= 1 (count args)) (map? (first args)))
                (first args) ; Already parsed by babashka
