@@ -340,7 +340,7 @@
 ;; Sync logic (pure functions)
 (defn sync-commands [issues tasks config project-id]
   (let [expanded-issues (expand-issues issues)
-        additional-labels (get config :additional-labels [])
+        additional-labels (get-in config [:todoist :additional-labels] [])
         issue-cmds (mapcat #(issue-sync-commands % tasks additional-labels project-id) expanded-issues)
         reassignment-cmds (reassignment-commands issues tasks)]
     (concat issue-cmds reassignment-cmds)))
