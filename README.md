@@ -81,7 +81,8 @@ They all do what they look like they do.
 
 **config.edn** (optional):
 ```clojure
-{;; Additional labels you might want to add to every single imported task
+{:todoist {:project-name "Work Inbox"} ;; Project to create tasks in (defaults to Inbox)
+ ;; Additional labels you might want to add to every single imported task
  :additional-labels ["work"]
  :llm {:enabled true
        :base-url "http://127.0.0.1:1234/v1"

@@ -1,3 +1,5 @@
 {:paths ["src"]
  :tasks {sync {:doc "Sync Linear issues to Todoist"
-               :task (exec 'linear-todoist-sync.core/-main)}}}
+               :task (exec 'linear-todoist-sync.core/-main)}
+         move-tagged-issues-to-project {:doc "Move tasks with 'from-linear' label to configured project"
+                                       :task (exec 'linear-todoist-sync.core/move-tagged-tasks-to-project!)}}}

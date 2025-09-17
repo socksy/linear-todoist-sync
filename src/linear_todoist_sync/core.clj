@@ -175,7 +175,14 @@
 (defn fetch-todoist-labels! [api-key]
   (fetch-rest-todoist! api-key "labels"))
 
-(defn add-item-command [content description priority labels & [{:keys [parent-id]}]]
+(defn fetch-todoist-projects! [api-key]
+  (fetch-rest-todoist! api-key "projects"))
+
+(defn find-project-id [projects project-name]
+  (when project-name
+    (:id (first (filter #(= (:name %) project-name) projects)))))
+
+(defn add-item-command [content description priority labels & [{:keys [parent-id project-id]}]]
   {:type "item_add"
    :temp_id (str (random-uuid))
    :uuid (str (random-uuid))
@@ -183,7 +190,8 @@
                   :labels (concat ["from-linear"] labels)
                   :priority priority}
            description (assoc :description description)
-           parent-id (assoc :parent_id parent-id))})
+           parent-id (assoc :parent_id parent-id)
+           project-id (assoc :project_id project-id))})
 
 (defn complete-item-command [item-id]
   {:type "item_complete"
@@ -199,6 +207,11 @@
   {:type "item_update"
    :uuid (str (random-uuid))
    :args {:id item-id :labels labels}})
+
+(defn move-item-command [item-id project-id]
+  {:type "item_move"
+   :uuid (str (random-uuid))
+   :args {:id item-id :project_id project-id}})
 
 (defn execute-todoist-commands! [api-key commands]
   (when (seq commands)
@@ -277,7 +290,7 @@
          [main-issue])))
    issues))
 
-(defn issue-sync-commands [issue tasks additional-labels]
+(defn issue-sync-commands [issue tasks additional-labels project-id]
   (let [existing-task (matching-task issue tasks)
         issue-completed? (completed-issue? issue)
         expected-content (task-content issue)
@@ -291,7 +304,9 @@
                         (task-description issue)
                         priority
                         additional-labels
-                        (when parent-task {:parent-id (get parent-task :id)}))]
+                        (cond-> {}
+                          parent-task (assoc :parent-id (get parent-task :id))
+                          project-id (assoc :project-id project-id)))]
       
       ;; Skip if task doesn't exist but issue is already completed
       (and (nil? existing-task) issue-completed?)
@@ -323,10 +338,10 @@
             reassigned-tasks)))
 
 ;; Sync logic (pure functions)
-(defn sync-commands [issues tasks config]
+(defn sync-commands [issues tasks config project-id]
   (let [expanded-issues (expand-issues issues)
         additional-labels (get config :additional-labels [])
-        issue-cmds (mapcat #(issue-sync-commands % tasks additional-labels) expanded-issues)
+        issue-cmds (mapcat #(issue-sync-commands % tasks additional-labels project-id) expanded-issues)
         reassignment-cmds (reassignment-commands issues tasks)]
     (concat issue-cmds reassignment-cmds)))
 
@@ -382,7 +397,9 @@
         {:keys [linear todoist]} secrets-config
         issues (assigned-issues (:api-key linear))
         tasks (fetch-todoist-items! (:api-key todoist))
-        sync-cmds (sync-commands issues tasks app-config)
+        projects (fetch-todoist-projects! (:api-key todoist))
+        project-id (find-project-id projects (get-in app-config [:todoist :project-name]))
+        sync-cmds (sync-commands issues tasks app-config project-id)
         llm-cmds (if skip-llm? [] (llm-label-commands tasks issues app-config verbose? work-dir))
         commands (concat sync-cmds llm-cmds)]
     
@@ -402,6 +419,39 @@
         (do (execute-todoist-commands! (:api-key todoist) commands)
             (println "Sync completed!")))
       (println "No changes needed."))))
+
+(defn move-tagged-tasks-to-project! [opts]
+  (let [dry-run? (:dry-run opts)
+        verbose? (:verbose opts)
+        work-dir (:work-dir opts)
+        secrets-config (secrets work-dir)
+        app-config (config work-dir)
+        {:keys [todoist]} secrets-config
+        tasks (fetch-todoist-items! (:api-key todoist))
+        projects (fetch-todoist-projects! (:api-key todoist))
+        project-name (get-in app-config [:todoist :project-name])
+        project-id (find-project-id projects project-name)]
+    
+    (if-not project-id
+      (println "Error: Project" (str "\"" project-name "\"") "not found in Todoist")
+      (let [tagged-tasks (->> tasks
+                             (filter #(some #{"from-linear"} (:labels %)))
+                             (remove :checked))
+            move-commands (map #(move-item-command (:id %) project-id) tagged-tasks)]
+        
+        (when verbose?
+          (println "Found" (count tagged-tasks) "tasks with 'from-linear' label")
+          (println "Target project:" project-name "(" project-id ")"))
+        
+        (if (seq move-commands)
+          (if dry-run?
+            (do (println "Dry run - would move" (count move-commands) "tasks to" project-name)
+                (when verbose?
+                  (doseq [task tagged-tasks]
+                    (println " " (:content task)))))
+            (do (execute-todoist-commands! (:api-key todoist) move-commands)
+                (println "Moved" (count move-commands) "tasks to" project-name)))
+          (println "No tagged tasks found to move."))))))
 
 (defn -main [& args]
   (let [spec {:spec {:skip-llm {:desc "Skip LLM processing"}
