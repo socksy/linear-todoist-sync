@@ -2,15 +2,26 @@
   (:require [babashka.http-client :as http]
             [babashka.cli :as cli]
             [cheshire.core :as json]
+            [clojure.edn :as edn]
             [clojure.string :as str]))
 
 (defn secrets [& [work-dir]]
-  (let [path (if work-dir (str work-dir "/secrets.edn") "secrets.edn")]
-    (try
-      (-> path slurp read-string)
-      (catch Exception _
-        (println "Error: secrets.edn not found. Copy secrets.edn.example and add your API keys.")
-        (System/exit 1)))))
+  (let [todoist-api-key (not-empty (System/getenv "todoist_api_key"))
+        linear-api-key (not-empty (System/getenv "linear_api_key"))
+        secrets (cond->
+                    (try
+                      (-> (str (or work-dir ".") "/secrets.edn") slurp edn/read-string)
+                      (catch java.io.FileNotFoundException _
+                        {}))
+                  todoist-api-key (assoc-in [:todoist :api-key] todoist-api-key)
+                  linear-api-key (assoc-in [:linear :api-key] linear-api-key))]
+    (when-not (and (get-in secrets [:todoist :api-key])
+                 (get-in secrets [:linear :api-key]))
+      (.println *err* "Missing secrets, either copy secrets.edn.example to secrets.edn,")
+      (.println *err* "or set the env vars $todoist_api_key and $linear_api_key.")
+      (.println *err* (str work-dir "/secrets.edn"))
+      (System/exit 1))
+    secrets))
 
 (defn config [& [work-dir]]
   (if-let [found-path (first (filter #(.exists (java.io.File. %)) 
@@ -29,7 +40,7 @@
   (let [path (if work-dir (str work-dir "/.llm-cache.edn") ".llm-cache.edn")]
     (try
       (-> path slurp read-string)
-      (catch Exception _
+      (catch java.io.FileNotFoundException _
         #{}))))
 
 (defn save-llm-cache! [cache & [work-dir]]

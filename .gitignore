@@ -1,3 +1,6 @@
 secrets.edn
 .llm-cache.edn
 config.edn
+bin/bb-linux-amd64
+bin/bb-linux-aarch64
+.clj-kondo

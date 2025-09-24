@@ -1,0 +1,20 @@
+[app]
+name = "linear-todoist-sync"
+script = "./bb_wrapper.py"
+source = [
+    "src/**/*.clj",
+    "bb.edn",
+    "config.edn",
+    "bin/bb-linux-amd64",
+    "bb_wrapper.py"
+]
+
+[[parameters]]
+name = "bb_task"
+description = "Babashka task to run"
+default = "sync"
+
+[[parameters]]
+name = "bb_args"
+description = "Additional arguments to pass to the babashka task"
+default = "--verbose --skip-llm"

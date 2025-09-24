@@ -2,4 +2,8 @@
  :tasks {sync {:doc "Sync Linear issues to Todoist"
                :task (exec 'linear-todoist-sync.core/-main)}
          move-tagged-issues-to-project {:doc "Move tasks with 'from-linear' label to configured project"
-                                       :task (exec 'linear-todoist-sync.core/move-tagged-tasks-to-project!)}}}
+                                       :task (exec 'linear-todoist-sync.core/move-tagged-tasks-to-project!)}
+         setup-tower {:requires ([bb-tower-deploy.core])
+                      :task (bb-tower-deploy.core/setup {:app-name "linear-todoist-sync"
+                                                         :default-task "sync"})
+                      :extra-deps {io.github.socksy/bb-tower-deploy {:git/tag "v1" :git/sha "f737fa7"}}}}}
