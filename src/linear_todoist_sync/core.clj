@@ -424,9 +424,8 @@
     (if (seq commands)
       (if dry-run?
         (do (println "\nDry run - would execute" (count commands) "commands:")
-            (when verbose?
-              (doseq [cmd commands]
-                (println " " (:type cmd) (:args cmd)))))
+            (doseq [cmd commands]
+              (println " " (:type cmd) (:args cmd))))
         (do (execute-todoist-commands! (:api-key todoist) commands)
             (println "Sync completed!")))
       (println "No changes needed."))))
