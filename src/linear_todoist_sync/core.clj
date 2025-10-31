@@ -3,7 +3,8 @@
             [babashka.cli :as cli]
             [cheshire.core :as json]
             [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [graphql-query.core :refer [graphql-query]]))
 
 (defn secrets [& [work-dir]]
   (let [todoist-api-key (not-empty (System/getenv "todoist_api_key"))
@@ -101,108 +102,51 @@
       (println "Failed to connect to Linear API:" (.getMessage e))
       (System/exit 1))))
 
+(def issue-fields
+  [:id :title :description :url :createdAt :archivedAt
+   :priority :priorityLabel :branchName
+   [:state [:name :type]]
+   [:cycle [:id :name :startsAt :endsAt :isActive :isPrevious :isFuture]]])
+
 (defn assigned-issues [api-key]
-  (let [query "query {
-                 viewer {
-                   assignedIssues(
-                     first: 100,
-                     filter: {
-                       and: [
-                         {
-                           or: [
-                             # we want all top level issues
-                             { parent: { null: true } },
-                             # for subisssues we want:
-                             { parent: {
-                               or: [
-                                 # issues where the parent is not assigned
-                                 { assignee: { null: true } },
-                                 # issues where the parent is assigned to someone else
-                                 { assignee: { isMe: { eq: false } } }
-                                 # all other subissues will be included as children of the top
-                                 # level issues, so this way we avoid dupes by including them
-                                 # both as sub issues and also issues
-                               ]
-                             }}
-                           ]
-                         },
-                         {
-                           # try to reduce total number of issues we're fetching, since I don't
-                           # wanna paginate - and we probably don't care about v. old completed
-                           # issues anyway. So only include `completed` if they're from the
-                           # current cycle or the last
-                           or: [
-                             # include non-completed issues
-                             { state: { type: { neq: \"completed\" } } },
-                             # include completed issues from active/previous cycles
-                             { and: [
-                               { state: { type: { eq: \"completed\" } } },
-                               { cycle: {
-                                 or: [
-                                   { isActive: { eq: true } },
-                                   { isPrevious: { eq: true } },
-                                   { isFuture: { eq: true } }
-                                 ]
-                               }}
-                             ]}
-                           ]
-                         }
-                       ]
-                     }
-                   ) {
-                     nodes {
-                       id
-                       title
-                       description
-                       url
-                       createdAt
-                       archivedAt
-                       priority
-                       priorityLabel
-                       branchName
-                       state {
-                         name
-                         type
-                       }
-                       cycle {
-                         id
-                         name
-                         startsAt
-                         endsAt
-                         isActive
-                         isPrevious
-                         isFuture
-                       }
-                       children {
-                         nodes {
-                           id
-                           title
-                           description
-                           url
-                           createdAt
-                           archivedAt
-                           priority
-                           priorityLabel
-                           branchName
-                           state {
-                             name
-                             type
-                           }
-                           cycle {
-                             id
-                             name
-                             startsAt
-                             endsAt
-                             isActive
-                             isPrevious
-                             isFuture
-                           }
-                         }
-                       }
-                     }
-                   }
-                 }
-               }"
+  (let [query (graphql-query
+               {:queries
+                [[:viewer
+                  [[:assignedIssues
+                    {:first 100
+                     :filter
+                     {:and
+                      [;; we want all top level issues
+                       ;; for subisssues we want:
+                       ;;   - issues where the parent is not assigned
+                       ;;   - issues where the parent is assigned to someone else
+                       ;; all other subissues will be included as children of the top
+                       ;; level issues, so this way we avoid dupes by including them
+                       ;; both as sub issues and also issues
+                       {:or
+                        [{:parent {:null true}}
+                         {:parent
+                          {:or
+                           [{:assignee {:null true}}
+                            {:assignee {:isMe {:eq false}}}]}}]}
+                       ;; try to reduce total number of issues we're fetching, since I don't
+                       ;; wanna paginate - and we probably don't care about v. old completed
+                       ;; issues anyway. So only include `completed` if they're from the
+                       ;; current cycle or the last
+                       {:or
+                        [;; include non-completed issues
+                         {:state {:type {:neq "completed"}}}
+                         ;; include completed issues from active/previous cycles
+                         {:and
+                          [{:state {:type {:eq "completed"}}}
+                           {:cycle
+                            {:or
+                             [{:isActive {:eq true}}
+                              {:isPrevious {:eq true}}
+                              {:isFuture {:eq true}}]}}]}]}]}}
+                    [[:nodes
+                      (conj issue-fields
+                            [:children [[:nodes issue-fields]]])]]]]]]})
         result (query-linear! api-key query)
         issues (get-in result [:data :viewer :assignedIssues :nodes])]
     issues))
