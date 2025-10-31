@@ -411,7 +411,7 @@
         projects (fetch-todoist-projects! (:api-key todoist))
         project-id (find-project-id projects (get-in app-config [:todoist :project-name]))
         sync-cmds (sync-commands issues tasks app-config project-id)
-        llm-cmds (if skip-llm? [] (llm-label-commands tasks issues app-config verbose? work-dir))
+        llm-cmds (if (or skip-llm? dry-run?) [] (llm-label-commands tasks issues app-config verbose? work-dir))
         commands (concat sync-cmds llm-cmds)]
     
     (when verbose?
