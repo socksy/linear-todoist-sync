@@ -104,7 +104,7 @@
 (defn assigned-issues [api-key]
   (let [query "query {
                  viewer {
-                   assignedIssues(first: 100, includeArchived: true) {
+                   assignedIssues(first: 100, includeArchived: true, filter: { parent: { null: true } }) {
                      nodes {
                        id
                        title
