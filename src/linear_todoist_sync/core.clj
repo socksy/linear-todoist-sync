@@ -107,21 +107,46 @@
                    assignedIssues(
                      first: 100,
                      filter: {
-                       or: [
-                         # we want all top level issues
-                         { parent: { null: true } },
-                         # for subisssues we want:
-                         { parent: {
+                       and: [
+                         {
                            or: [
-                             # issues where the parent is not assigned
-                             { assignee: { null: true } },
-                             # issues where the parent is assigned to someone else
-                             { assignee: { isMe: { eq: false } } }
-                             # all other subissues will be included as children of the top
-                             # level issues, so this way we avoid dupes by including them
-                             # both as sub issues and also issues
+                             # we want all top level issues
+                             { parent: { null: true } },
+                             # for subisssues we want:
+                             { parent: {
+                               or: [
+                                 # issues where the parent is not assigned
+                                 { assignee: { null: true } },
+                                 # issues where the parent is assigned to someone else
+                                 { assignee: { isMe: { eq: false } } }
+                                 # all other subissues will be included as children of the top
+                                 # level issues, so this way we avoid dupes by including them
+                                 # both as sub issues and also issues
+                               ]
+                             }}
                            ]
-                         }}
+                         },
+                         {
+                           # try to reduce total number of issues we're fetching, since I don't
+                           # wanna paginate - and we probably don't care about v. old completed
+                           # issues anyway. So only include `completed` if they're from the
+                           # current cycle or the last
+                           or: [
+                             # include non-completed issues
+                             { state: { type: { neq: \"completed\" } } },
+                             # include completed issues from active/previous cycles
+                             { and: [
+                               { state: { type: { eq: \"completed\" } } },
+                               { cycle: {
+                                 or: [
+                                   { isActive: { eq: true } },
+                                   { isPrevious: { eq: true } },
+                                   { isFuture: { eq: true } }
+                                 ]
+                               }}
+                             ]}
+                           ]
+                         }
                        ]
                      }
                    ) {
@@ -144,6 +169,9 @@
                          name
                          startsAt
                          endsAt
+                         isActive
+                         isPrevious
+                         isFuture
                        }
                        children {
                          nodes {
@@ -165,6 +193,9 @@
                              name
                              startsAt
                              endsAt
+                             isActive
+                             isPrevious
+                             isFuture
                            }
                          }
                        }
