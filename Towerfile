@@ -3,6 +3,7 @@ name = "linear-todoist-sync"
 script = "./bb_wrapper.py"
 source = [
     "src/**/*.clj",
+    "resources/**/*",
     "bb.edn",
     "config.edn",
     "bin/bb-linux-amd64",
