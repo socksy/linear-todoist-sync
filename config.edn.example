@@ -5,7 +5,7 @@
        :model "qwen/qwen3-4b-thinking-2507"
        :timeout 120000
        :labels-to-add ["next"]
-       :prompt "I have the following task:
+       :prompt "I have the following software development task:
 
 ```
 {task-content}
@@ -13,25 +13,33 @@
 {task-description}
 ```
 
-Please answer with either \"yes\" or \"no\" — does this task, with the current description and with reasonable interpretation from an average programmer, classify as a \"next action\", in the sense of GTD/Getting Things Done?
+Does this task qualify as a \"next action\" in the GTD sense - something actionable you could start working on right now?
 
-A Next Action should be:
-- A specific, concrete physical action
-- Clear about what exactly needs to be done
-- Actionable right now without dependencies
-- Not vague or abstract
+A Next Action in software development should be:
+- Specific enough to start coding/implementing without needing clarification
+- Scoped to something achievable in one focused work session
+- Not blocked by other work that must be done first
+- Clear on the technical change being requested
 
-Examples of Next Actions:
-- \"Call caterer to confirm menu\"
-- \"Email John about Q3 report\"  
-- \"Draft agenda for team meeting\"
-- \"Research competitor websites for design inspiration\"
-- \"Take out trash bags to the curb\"
+Examples of Next Actions in software:
+- \"Add isDefault boolean flag to Run parameters model\"
+- \"Update API endpoint to return version field\"
+- \"Write migration to add tags column to runners table\"
+- \"Refactor authentication middleware to use new token format\"
+- \"Fix bug where logout doesn't clear session cookie\"
 
 What is NOT a Next Action:
-- Vague tasks: \"Think about marketing strategy\" or \"Improve website\"
-- Projects: \"Organize garage\" (instead: \"Sort garage items into keep/donate/trash piles\")
-- Waiting tasks: \"Wait for Sarah's approval\" (instead: \"Email Sarah to ask for approval\")
-- Tasks requiring prerequisites: \"Deploy to production\" when code isn't ready
+- Too vague: \"Improve performance\", \"Fix issues\", \"Add metrics\" with no details
+- Lacks specifics: \"Update model\" without saying which fields or how
+- Multi-step projects: \"Build user authentication system\" (break into smaller tasks)
+- Has sub-issues: If noted as having sub-issues, it's a project/epic, not a next action
+- Requires design decisions: Tasks that describe a problem but not the specific solution
+- Blocked: \"Deploy feature X\" when feature X isn't finished yet
 
-Consider the task content and description. Does this specify a clear, actionable next step that could be started immediately?"}}
+Evaluation criteria:
+- If the task has no description and the title is vague (like \"Metrics for debugging later\"), answer NO
+- If the task describes a problem but not a specific solution (\"we need to show X\" without saying how), answer NO
+- If the task is noted as having sub-issues, answer NO - it's a project
+- Only answer YES if you could reasonably start writing code without asking clarifying questions
+
+Does this task specify something you could start implementing right now?"}}

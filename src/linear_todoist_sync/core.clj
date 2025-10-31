@@ -49,9 +49,10 @@
 
 (defn llm-request! [base-url model prompt opts]
   (try
-    (let [payload {:stream false
-                   :model model
-                   :messages [{:role "user" :content prompt}]}
+    (let [payload (merge {:stream false
+                          :model model
+                          :messages [{:role "user" :content prompt}]}
+                         opts)
           url (str base-url "/chat/completions")
           payload-json (json/generate-string payload)
           result (babashka.process/shell {:out :string}
@@ -70,21 +71,36 @@
       (println "LLM request failed:" (.getMessage e))
       nil)))
 
-(defn evaluate-task-with-llm [task {:keys [base-url model prompt] :as llm-config}]
-  (let [filled-prompt (-> prompt
+(defn evaluate-task-with-llm [task issue {:keys [base-url model prompt] :as llm-config}]
+  (let [sub-issue-count (count (get-in issue [:children :nodes]))
+        context-note (when (pos? sub-issue-count)
+                       (str "IMPORTANT: This is a parent issue with " sub-issue-count " sub-issues - it's an epic/project, not an individual task.\n\n"))
+        filled-prompt (-> prompt
                         (str/replace "{task-content}" (:content task ""))
-                        (str/replace "{task-description}" (:description task "")))
-        reasoning (llm-request! base-url model filled-prompt 
+                        (str/replace "{task-description}" (str (or context-note "") (:description task ""))))]
+    (let [reasoning (llm-request! base-url model filled-prompt
                                {:max_tokens 200 :temperature 0.1})
-        json-prompt (str reasoning "\n\nAnswer with JSON: {\"answer_is_yes\": true/false}")
-        result (llm-request! base-url model json-prompt 
-                            {:max_tokens 50 :temperature 0.0})]
-    
-    (when (and reasoning result)
-      (try
-        (:answer_is_yes (json/parse-string result true))
-        (catch Exception _
-          (str/includes? (str/lower-case result) "true"))))))
+        json-prompt (str reasoning "\n\nAnswer with JSON: {\"answer_is_yes\": true/false, \"reason\": \"brief explanation\"}")
+        json-schema {:type "object"
+                     :properties {:answer_is_yes {:type "boolean"}
+                                  :reason {:type "string"}}
+                     :required ["answer_is_yes"]}
+        result (llm-request! base-url model json-prompt
+                            {:max_tokens 100
+                             :temperature 0.0
+                             :response_format {:type "json_schema"
+                                              :json_schema {:name "task_evaluation"
+                                                           :strict true
+                                                           :schema json-schema}}})]
+
+      (when (and reasoning result)
+        (try
+          (let [parsed (json/parse-string result true)]
+            {:is-labelled (:answer_is_yes parsed)
+             :reason (:reason parsed "")})
+          (catch Exception _
+            {:is-labelled (str/includes? (str/lower-case result) "true")
+             :reason ""}))))))
 
 ;; Linear GraphQL Integration
 (defn query-linear! [api-key query]
@@ -219,17 +235,17 @@
         linear-id (get issue :id)
         priority-label (get issue :priorityLabel)
         cycle (get issue :cycle)
-        
+
         linear-info [(when url (str "Linear Link: " url))
                      (when branch-name (str "Linear Branch: " branch-name))
                      (when priority-label (str "Linear Priority: " priority-label))
                      (when cycle (str "Linear Cycle: " (get cycle :name)))
                      (str "Linear ID: " linear-id)]
-        
+
         metadata-section (->> linear-info
                              (filter some?)
                              (str/join "\n"))]
-    
+
     (if description
       (str description "\n\n" metadata-section)
       metadata-section)))
@@ -303,26 +319,40 @@
 
 ;; Sync logic (pure functions)
 (defn sync-commands [issues tasks config project-id]
-  (let [expanded-issues (expand-issues issues)
-        additional-labels (get-in config [:todoist :additional-labels] [])
-        issue-cmds (mapcat #(issue-sync-commands % tasks additional-labels project-id) expanded-issues)
+  (let [additional-labels (get-in config [:todoist :additional-labels] [])
+        issue-cmds (mapcat #(issue-sync-commands % tasks additional-labels project-id) issues)
         reassignment-cmds (reassignment-commands issues tasks)]
     (concat issue-cmds reassignment-cmds)))
 
-(defn llm-label-commands [tasks issues {:keys [llm] :as config} & [verbose? work-dir]]
+(defn format-evaluation-result [is-labelled? labels reason]
+  (let [green "\033[32m"
+        red "\033[31m"
+        grey "\033[90m"
+        reset "\033[0m"
+        status (if is-labelled?
+                 (str green "✓ " (str/join "/" labels) reset)
+                 (str red "✗ skip" reset))
+        reason-str (when (seq reason)
+                     (str "\n  " grey reason reset))]
+    (str status reason-str)))
+
+(defn llm-label-commands [tasks issues raw-issues {:keys [llm] :as config} & [verbose? work-dir]]
   (if-not (:enabled llm)
     []
     (let [{:keys [labels-to-add]} llm
           issues-by-id (zipmap (map :id issues) issues)
+          raw-issues-by-id (zipmap (map :id raw-issues) raw-issues)
           llm-cache (load-llm-cache work-dir)
           eligible-tasks (->> tasks
-                             (filter #(not (:checked %)))
-                             (filter #(extract-issue-id (:description %)))
-                             (remove #(when-let [issue-id (extract-issue-id (:description %))]
-                                       (when-let [issue (get issues-by-id issue-id)]
-                                         (completed-issue? issue))))
+                             (filter (complement :checked))
+                             (filter (comp extract-issue-id :description))
+                             (remove (fn [task]
+                                       (some-> task :description extract-issue-id issues-by-id completed-issue?)))
                              (remove #(some (set (:labels %)) labels-to-add))
-                             (remove #(contains? llm-cache (:id %))))]
+                             (remove #(contains? llm-cache (:id %)))
+                             (group-by (comp extract-issue-id :description))
+                             vals
+                             (map first))]
       (when verbose? (println "Evaluating" (count eligible-tasks) "tasks with LLM..."))
       (loop [remaining eligible-tasks
              processed 0
@@ -333,19 +363,23 @@
               commands)
           (let [task (first remaining)
                 task-id (:id task)
+                issue-id (extract-issue-id (:description task))
+                raw-issue (get raw-issues-by-id issue-id)
                 task-title (subs (:content task) 0 (min 50 (count (:content task))))
-                progress-str (str "[" (inc processed) "/" (count eligible-tasks) "]")]
+                cyan "\033[36m"
+                reset "\033[0m"
+                progress-str (str cyan "[" (inc processed) "/" (count eligible-tasks) "]" reset)
+                evaluation (evaluate-task-with-llm task raw-issue llm)]
             (print (str progress-str " " task-title "... "))
             (flush)
-            (if (evaluate-task-with-llm task llm)
-              (do (println "✓" (str/join "/" labels-to-add))
-                  (recur (rest remaining) 
-                         (inc processed)
-                         (conj commands (add-labels-command task-id 
-                                                           (vec (concat (:labels task) labels-to-add))))
-                         (conj cache task-id)))
-              (do (println "✗ skip")
-                  (recur (rest remaining) (inc processed) commands (conj cache task-id))))))))))
+            (println (format-evaluation-result (:is-labelled evaluation) labels-to-add (:reason evaluation)))
+            (if (:is-labelled evaluation)
+              (recur (rest remaining)
+                     (inc processed)
+                     (conj commands (add-labels-command task-id
+                                                       (vec (concat (:labels task) labels-to-add))))
+                     (conj cache task-id))
+              (recur (rest remaining) (inc processed) commands (conj cache task-id)))))))))
 
 (defn show-help
   [spec]
@@ -359,14 +393,15 @@
         secrets-config (secrets work-dir)
         app-config (config work-dir)
         {:keys [linear todoist]} secrets-config
-        issues (assigned-issues (:api-key linear))
+        raw-issues (assigned-issues (:api-key linear))
+        issues (expand-issues raw-issues)
         tasks (fetch-todoist-items! (:api-key todoist))
         projects (fetch-todoist-projects! (:api-key todoist))
         project-id (find-project-id projects (get-in app-config [:todoist :project-name]))
         sync-cmds (sync-commands issues tasks app-config project-id)
-        llm-cmds (if (or skip-llm? dry-run?) [] (llm-label-commands tasks issues app-config verbose? work-dir))
+        llm-cmds (if (or skip-llm? dry-run?) [] (llm-label-commands tasks issues raw-issues app-config verbose? work-dir))
         commands (concat sync-cmds llm-cmds)]
-    
+
     (when verbose?
       (println "Found" (count issues) "Linear issues")
       (println "Found" (count tasks) "Todoist tasks"))
