@@ -104,7 +104,27 @@
 (defn assigned-issues [api-key]
   (let [query "query {
                  viewer {
-                   assignedIssues(first: 100, includeArchived: true, filter: { parent: { null: true } }) {
+                   assignedIssues(
+                     first: 100,
+                     filter: {
+                       or: [
+                         # we want all top level issues
+                         { parent: { null: true } },
+                         # for subisssues we want:
+                         { parent: {
+                           or: [
+                             # issues where the parent is not assigned
+                             { assignee: { null: true } },
+                             # issues where the parent is assigned to someone else
+                             { assignee: { isMe: { eq: false } } }
+                             # all other subissues will be included as children of the top
+                             # level issues, so this way we avoid dupes by including them
+                             # both as sub issues and also issues
+                           ]
+                         }}
+                       ]
+                     }
+                   ) {
                      nodes {
                        id
                        title
