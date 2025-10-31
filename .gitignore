@@ -4,3 +4,5 @@ config.edn
 bin/bb-linux-amd64
 bin/bb-linux-aarch64
 .clj-kondo
+bin/bb-macos-amd64
+bin/bb-macos-aarch64

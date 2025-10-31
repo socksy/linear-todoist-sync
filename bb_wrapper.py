@@ -34,11 +34,15 @@ def main():
             bb_binary = 'bin/bb-linux-aarch64'
         else:
             raise RuntimeError(f'Unsupported Linux architecture: {arch}')
+    elif system == 'darwin':
+        if arch in ['x86_64', 'amd64']:
+            bb_binary = 'bin/bb-macos-amd64'
+        elif arch in ['aarch64', 'arm64']:
+            bb_binary = 'bin/bb-macos-aarch64'
+        else:
+            raise RuntimeError(f'Unsupported macOS architecture: {arch}')
     else:
-        # For local development on non-Linux systems, try to use system bb
-        bb_binary = shutil.which('bb')
-        if not bb_binary:
-            raise RuntimeError(f'babashka not found in PATH. Install babashka or run on Linux with the bundled binaries.')
+        raise RuntimeError(f'Unsupported platform: {system}')
 
     # Run the babashka task
     try:
