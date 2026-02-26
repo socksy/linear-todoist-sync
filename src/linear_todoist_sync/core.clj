@@ -1,27 +1,105 @@
 (ns linear-todoist-sync.core
   (:require [babashka.http-client :as http]
             [babashka.cli :as cli]
+            [babashka.pods :as pods]
             [cheshire.core :as json]
-            [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [org.httpkit.server :as server]))
 
-(defn secrets [& [work-dir]]
-  (let [todoist-api-key (not-empty (System/getenv "todoist_api_key"))
-        linear-api-key (not-empty (System/getenv "linear_api_key"))
-        secrets (cond->
-                    (try
-                      (-> (str (or work-dir ".") "/secrets.edn") slurp edn/read-string)
-                      (catch java.io.FileNotFoundException _
-                        {}))
-                  todoist-api-key (assoc-in [:todoist :api-key] todoist-api-key)
-                  linear-api-key (assoc-in [:linear :api-key] linear-api-key))]
-    (when-not (and (get-in secrets [:todoist :api-key])
-                 (get-in secrets [:linear :api-key]))
-      (.println *err* "Missing secrets, either copy secrets.edn.example to secrets.edn,")
-      (.println *err* "or set the env vars $todoist_api_key and $linear_api_key.")
-      (.println *err* (str work-dir "/secrets.edn"))
+(defn- exchange-todoist-code! [client-id client-secret code]
+  (let [response (http/post "https://todoist.com/oauth/access_token"
+                            {:headers {"Content-Type" "application/json"}
+                             :body (json/generate-string
+                                    {:client_id client-id
+                                     :client_secret client-secret
+                                     :code code})})
+        token (when (= 200 (:status response))
+                (:access_token (json/parse-string (:body response) true)))]
+    (when-not token
+      (.println *err* (str "Token exchange failed (" (:status response) ")"))
       (System/exit 1))
-    secrets))
+    token))
+
+(defn todoist-oauth! [client-id client-secret]
+  (let [state (str (random-uuid))
+        result (promise)
+        handler (fn [{:keys [uri query-string]}]
+                  (if-not (str/starts-with? uri "/callback")
+                    {:status 404 :body "Not found"}
+                    (let [params (->> (str/split (or query-string "") #"&")
+                                     (remove str/blank?)
+                                     (map #(str/split % #"=" 2))
+                                     (filter #(= 2 (count %)))
+                                     (into {}))
+                          error (or (get params "error")
+                                    (when (not= (get params "state") state) "State mismatch"))]
+                      (if error
+                        (do (deliver result {:error error})
+                            {:status 400 :body "Authorization failed. You can close this tab."})
+                        (do (deliver result {:code (get params "code")})
+                            {:status 200 :body "Authorization successful! You can close this tab."})))))
+        port (parse-long (or (System/getenv "PORT") "8910"))
+        redirect-uri (if-let [hostname (System/getenv "TOWER__HOSTNAME")]
+                       (str "https://" hostname ".apps.tower.dev/callback")
+                       (str "http://localhost:" port "/callback"))
+        srv (server/run-server handler {:port port})]
+    (println "Open this URL to authorize Todoist:")
+    (println (str "https://todoist.com/oauth/authorize"
+                  "?client_id=" client-id
+                  "&scope=data:read_write"
+                  "&state=" state
+                  "&redirect_uri=" redirect-uri))
+    (println "\nWaiting for authorization...")
+    (let [cb (deref result 300000 nil)]
+      (srv)
+      (when-not cb
+        (.println *err* "OAuth timed out after 5 minutes.")
+        (System/exit 1))
+      (when (:error cb)
+        (.println *err* (str "OAuth failed: " (:error cb)))
+        (System/exit 1))
+      (exchange-todoist-code! client-id client-secret (:code cb)))))
+
+(defn persist-todoist-token! [token]
+  (try
+    (pods/load-pod ["python3" "pod_tower.py"])
+    (require '[pod.tower :as tower])
+    (let [describe-key (resolve 'pod.tower/describe-secrets-key)
+          encrypt (resolve 'pod.tower/encrypt-secret)
+          preview-fn (resolve 'pod.tower/secret-preview)
+          create (resolve 'pod.tower/create-secret)
+          update (resolve 'pod.tower/update-secret)
+          key-info (describe-key :format "spki" :environment "default")
+          public-key (:public-key key-info)
+          encrypted (encrypt public-key token)
+          preview (preview-fn token)
+          secret-opts {:name "todoist_api_key" :encrypted-value encrypted :preview preview :environment "default"}]
+      (try
+        (create secret-opts)
+        (catch Exception _
+          (update secret-opts)))
+      (println "Token persisted to Tower secrets."))
+    (catch Exception e
+      (.println *err* (str "Warning: Could not persist token to Tower: " (.getMessage e)))
+      (.println *err* "Set $todoist_api_key manually for future runs."))))
+
+(defn secrets [& [_work-dir]]
+  (let [todoist-api-key (not-empty (System/getenv "todoist_api_key"))
+        todoist-client-id (not-empty (System/getenv "todoist_client_id"))
+        todoist-client-secret (not-empty (System/getenv "todoist_client_secret"))
+        linear-api-key (not-empty (System/getenv "linear_api_key"))
+        todoist-key (or todoist-api-key
+                        (when (and todoist-client-id todoist-client-secret)
+                          (let [token (todoist-oauth! todoist-client-id todoist-client-secret)]
+                            (persist-todoist-token! token)
+                            token)))]
+    (when-not (and todoist-key linear-api-key)
+      (.println *err* "Missing credentials.")
+      (.println *err* "Set $todoist_api_key and $linear_api_key env vars,")
+      (.println *err* "or set $todoist_client_id and $todoist_client_secret for OAuth.")
+      (System/exit 1))
+    {:todoist {:api-key todoist-key}
+     :linear {:api-key linear-api-key}}))
 
 (defn config [& [work-dir]]
   (if-let [found-path (first (filter #(.exists (java.io.File. %)) 
@@ -450,6 +528,15 @@
             (do (execute-todoist-commands! (:api-key todoist) move-commands)
                 (println "Moved" (count move-commands) "tasks to" project-name)))
           (println "No tagged tasks found to move."))))))
+
+(defn run-auth! [& _args]
+  (let [client-id (not-empty (System/getenv "todoist_client_id"))
+        client-secret (not-empty (System/getenv "todoist_client_secret"))]
+    (when-not (and client-id client-secret)
+      (.println *err* "Set $todoist_client_id and $todoist_client_secret env vars.")
+      (System/exit 1))
+    (-> (todoist-oauth! client-id client-secret)
+        persist-todoist-token!)))
 
 (defn -main [& args]
   (let [spec {:spec {:skip-llm {:desc "Skip LLM processing"}
