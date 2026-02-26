@@ -1,59 +1,59 @@
 #!/usr/bin/env python3
 import os
+import platform
 import subprocess
 import sys
-import platform
-import glob
-import shutil
+import tarfile
+import urllib.request
 
-def get_default_task():
-    """Find the first .bb file in the directory"""
-    bb_files = glob.glob('*.bb')
-    if bb_files:
-        return os.path.splitext(bb_files[0])[0]
-    return 'main'
+BB_VERSION = "1.3.191"
 
-def main():
-    # Get the babashka task from environment variable or use smart default
-    bb_task = os.environ.get('bb_task')
-    if not bb_task:
-        bb_task = get_default_task()
-        print(f'No bb_task specified, using: {bb_task}')
 
-    # Get any additional task arguments from environment
-    bb_args = os.environ.get('bb_args', '')
-
-    # Determine babashka binary based on platform and architecture
+def get_bb_binary():
     system = platform.system().lower()
     arch = platform.machine().lower()
 
-    if system == 'linux':
-        if arch in ['x86_64', 'amd64']:
-            bb_binary = 'bin/bb-linux-amd64'
-        elif arch in ['aarch64', 'arm64']:
-            bb_binary = 'bin/bb-linux-aarch64'
-        else:
-            raise RuntimeError(f'Unsupported Linux architecture: {arch}')
-    elif system == 'darwin':
-        if arch in ['x86_64', 'amd64']:
-            bb_binary = 'bin/bb-macos-amd64'
-        elif arch in ['aarch64', 'arm64']:
-            bb_binary = 'bin/bb-macos-aarch64'
-        else:
-            raise RuntimeError(f'Unsupported macOS architecture: {arch}')
-    else:
-        raise RuntimeError(f'Unsupported platform: {system}')
+    match (system, arch):
+        case ("linux", "x86_64" | "amd64"):
+            variant, suffix = "linux-amd64", "-static"
+        case ("linux", "aarch64" | "arm64"):
+            variant, suffix = "linux-aarch64", "-static"
+        case ("darwin", "x86_64" | "amd64"):
+            variant, suffix = "macos-amd64", ""
+        case ("darwin", "aarch64" | "arm64"):
+            variant, suffix = "macos-aarch64", ""
+        case _:
+            raise RuntimeError(f"Unsupported platform: {system}/{arch}")
 
-    # Run the babashka task
-    try:
-        cmd = [bb_binary, bb_task]
-        if bb_args:
-            cmd.extend(bb_args.split())
-        result = subprocess.run(cmd, check=True)
-        sys.exit(result.returncode)
-    except subprocess.CalledProcessError as e:
-        print(f'Error running babashka task: {e}')
-        sys.exit(e.returncode)
+    cached = f"/tmp/bb-{variant}-{BB_VERSION}"
+    if not os.path.exists(cached):
+        url = f"https://github.com/babashka/babashka/releases/download/v{BB_VERSION}/babashka-{BB_VERSION}-{variant}{suffix}.tar.gz"
+        print(f"Downloading babashka v{BB_VERSION}...")
+        tarball = cached + ".tar.gz"
+        urllib.request.urlretrieve(url, tarball)
+        with tarfile.open(tarball, "r:gz") as tar:
+            member = tar.getmember("bb")
+            with tar.extractfile(member) as src, open(cached, "wb") as out:
+                out.write(src.read())
+        os.unlink(tarball)
+        os.chmod(cached, 0o755)
 
-if __name__ == '__main__':
+    return cached
+
+
+def main():
+    bb_task = os.environ.get("bb_task", "sync")
+    bb_args = os.environ.get("bb_args", "")
+
+    bb_binary = get_bb_binary()
+
+    cmd = [bb_binary, bb_task]
+    if bb_args:
+        cmd.extend(bb_args.split())
+
+    result = subprocess.run(cmd, check=False)
+    sys.exit(result.returncode)
+
+
+if __name__ == "__main__":
     main()

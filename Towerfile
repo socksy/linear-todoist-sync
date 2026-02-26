@@ -6,9 +6,6 @@ source = [
     "resources/**/*",
     "bb.edn",
     "config.edn",
-    "bin/bb-linux-amd64",
-    # uncomment for running locally on macOS
-    # "bin/bb-*",
     "bb_wrapper.py"
 ]
 
