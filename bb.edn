@@ -1,6 +1,8 @@
 {:paths ["src" "resources"]
  :tasks {sync {:doc "Sync Linear issues to Todoist"
                :task (exec 'linear-todoist-sync.core/-main)}
+         auth {:doc "Authenticate with Todoist via OAuth and persist token to Tower"
+               :task (exec 'linear-todoist-sync.core/run-auth!)}
          move-tagged-issues-to-project {:doc "Move tasks with 'from-linear' label to configured project"
                                        :task (exec 'linear-todoist-sync.core/move-tagged-tasks-to-project!)}
          setup-tower {:requires ([bb-tower-deploy.core])

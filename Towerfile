@@ -6,7 +6,9 @@ source = [
     "resources/**/*",
     "bb.edn",
     "config.edn",
-    "bb_wrapper.py"
+    "bb_wrapper.py",
+    "pod_tower.py",
+    "pyproject.toml"
 ]
 
 [[parameters]]
