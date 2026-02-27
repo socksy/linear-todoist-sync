@@ -203,14 +203,17 @@
         issues (get-in result [:data :viewer :assignedIssues :nodes])]
     issues))
 
-(defn sync-todoist! [api-key & [{:keys [method body]}]]
+(defn sync-todoist! [api-key & [{:keys [params]}]]
   (try
-    (let [response (http/request
-                    {:uri "https://api.todoist.com/sync/v9/sync"
-                     :method (or method :post)
-                     :headers {"Authorization" (str "Bearer " api-key)
-                               "Content-Type" "application/json"}
-                     :body (when body (json/generate-string body))})]
+    (let [encoded (when params
+                    (reduce-kv (fn [m k v]
+                                 (assoc m k (if (or (sequential? v) (map? v))
+                                              (json/generate-string v)
+                                              v)))
+                               {} params))
+          response (http/post "https://api.todoist.com/api/v1/sync"
+                              {:headers {"Authorization" (str "Bearer " api-key)}
+                               :form encoded})]
       (if (< (:status response) 400)
         (json/parse-string (:body response) true)
         (do (println "Todoist API error:" (:status response) (:body response))
@@ -220,13 +223,12 @@
       (System/exit 1))))
 
 (defn fetch-rest-todoist! [api-key endpoint]
-  (let [response (http/get (str "https://api.todoist.com/rest/v2/" endpoint)
+  (let [response (http/get (str "https://api.todoist.com/api/v1/" endpoint)
                           {:headers {"Authorization" (str "Bearer " api-key)}})]
     (json/parse-string (:body response) true)))
 
 (defn fetch-todoist-items! [api-key]
-  (let [result (sync-todoist! api-key
-                             {:body {:sync_token "*" :resource_types ["items"]}})
+  (let [result (sync-todoist! api-key {:params {:sync_token "*" :resource_types ["items"]}})
         items (get result :items)]
     items))
 
@@ -273,7 +275,7 @@
 
 (defn execute-todoist-commands! [api-key commands]
   (when (seq commands)
-    (sync-todoist! api-key {:body {:commands commands}})))
+    (sync-todoist! api-key {:params {:commands commands}})))
 
 (defn completed-issue? [issue]
   (let [state-type (get-in issue [:state :type])
