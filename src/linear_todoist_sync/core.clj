@@ -16,6 +16,19 @@
 (defn- err! [& args]
   (.println *err* (str red (apply str args) reset)))
 
+(defn- send-telegram! [message]
+  (when-let [bot-token (not-empty (System/getenv "telegram_bot_token"))]
+    (when-let [chat-id (not-empty (System/getenv "telegram_chat_id"))]
+      (try
+        (let [resp (http/post (str "https://api.telegram.org/bot" bot-token "/sendMessage")
+                              {:headers {"Content-Type" "application/json"}
+                               :body (json/generate-string {:chat_id (parse-long chat-id) :text message})
+                               :throw false})]
+          (when (>= (:status resp) 400)
+            (err! "Telegram notification failed: " (:status resp) " " (:body resp))))
+        (catch Exception e
+          (err! "Telegram notification failed: " (.getMessage e)))))))
+
 (defn- parse-query-params [query-string]
   (->> (str/split (or query-string "") #"&")
        (remove str/blank?)
@@ -60,14 +73,16 @@
                             {:status 400 :body "Authorization failed. You can close this tab."})
                         (do (deliver result {:code (get params "code")})
                             {:status 200 :body "Authorization successful! You can close this tab."})))))
-        srv (server/run-server handler {:port port})]
+        srv (server/run-server handler {:port port})
+        auth-link (str auth-url
+                       "?client_id=" client-id
+                       "&scope=" scope
+                       "&state=" state
+                       "&response_type=code"
+                       "&redirect_uri=" redirect-uri)]
     (println (str "Open this URL to authorize " name ":"))
-    (println (str bold auth-url
-                  "?client_id=" client-id
-                  "&scope=" scope
-                  "&state=" state
-                  "&response_type=code"
-                  "&redirect_uri=" redirect-uri reset))
+    (println (str bold auth-link reset))
+    (send-telegram! (str name " token expired. Re-authenticate:\n" auth-link))
     (println "\nWaiting for authorization...")
     (let [cb (deref result 300000 nil)]
       (srv)
@@ -78,6 +93,7 @@
         (err! "OAuth failed: " (:error cb))
         (System/exit 1))
       (exchange-code! provider (:code cb) redirect-uri))))
+
 
 (defn- persist-token! [secret-name env-var token]
   (try
@@ -100,7 +116,7 @@
       (println "Token persisted to Tower secrets."))
     (catch Exception e
       (err! "Warning: Could not persist token to Tower: " (.getMessage e))
-      (err! "Set $" env-var " manually for future runs.")))))
+      (err! "Set $" env-var " manually for future runs."))))
 
 (def ^:private todoist-provider
   {:name "Todoist"
@@ -612,7 +628,7 @@
                           (println " " (:content task)))))
                   (do (execute-todoist-commands! (:api-key todoist) move-commands)
                       (println "Moved" (count move-commands) "tasks to" project-name)))
-                (println "No tagged tasks found to move."))))))))
+                (println "No tagged tasks found to move.")))))))))
 
 (defn run-auth! [& _args]
   (let [providers (->> [todoist-provider linear-provider]
