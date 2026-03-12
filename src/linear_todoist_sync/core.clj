@@ -6,6 +6,16 @@
             [clojure.string :as str]
             [org.httpkit.server :as server]))
 
+(def ^:private bold "\033[1m")
+(def ^:private red "\033[31m")
+(def ^:private green "\033[32m")
+(def ^:private cyan "\033[36m")
+(def ^:private grey "\033[90m")
+(def ^:private reset "\033[0m")
+
+(defn- err! [& args]
+  (.println *err* (str red (apply str args) reset)))
+
 (defn- parse-query-params [query-string]
   (->> (str/split (or query-string "") #"&")
        (remove str/blank?)
@@ -28,7 +38,7 @@
         token (when (= 200 (:status response))
                 (get (json/parse-string (:body response) true) token-key))]
     (when-not token
-      (.println *err* (str "Token exchange failed (" (:status response) "): " (:body response)))
+      (err! "Token exchange failed (" (:status response) "): " (:body response))
       (System/exit 1))
     token))
 
@@ -52,20 +62,20 @@
                             {:status 200 :body "Authorization successful! You can close this tab."})))))
         srv (server/run-server handler {:port port})]
     (println (str "Open this URL to authorize " name ":"))
-    (println (str auth-url
+    (println (str bold auth-url
                   "?client_id=" client-id
                   "&scope=" scope
                   "&state=" state
                   "&response_type=code"
-                  "&redirect_uri=" redirect-uri))
+                  "&redirect_uri=" redirect-uri reset))
     (println "\nWaiting for authorization...")
     (let [cb (deref result 300000 nil)]
       (srv)
       (when-not cb
-        (.println *err* "OAuth timed out after 5 minutes.")
+        (err! "OAuth timed out after 5 minutes.")
         (System/exit 1))
       (when (:error cb)
-        (.println *err* (str "OAuth failed: " (:error cb)))
+        (err! "OAuth failed: " (:error cb))
         (System/exit 1))
       (exchange-code! provider (:code cb) redirect-uri))))
 
@@ -89,8 +99,8 @@
           (update secret-opts)))
       (println "Token persisted to Tower secrets."))
     (catch Exception e
-      (.println *err* (str "Warning: Could not persist token to Tower: " (.getMessage e)))
-      (.println *err* (str "Set $" env-var " manually for future runs.")))))
+      (err! "Warning: Could not persist token to Tower: " (.getMessage e))
+      (err! "Set $" env-var " manually for future runs.")))))
 
 (def ^:private todoist-provider
   {:name "Todoist"
@@ -115,22 +125,25 @@
    :client-id-env "linear_client_id"
    :client-secret-env "linear_client_secret"})
 
-(defn- get-or-oauth! [{:keys [api-key-env client-id-env client-secret-env secret-name] :as provider}]
+(defn- do-oauth! [{:keys [client-id-env client-secret-env secret-name api-key-env] :as provider}]
+  (let [client-id (not-empty (System/getenv client-id-env))
+        client-secret (not-empty (System/getenv client-secret-env))]
+    (when (and client-id client-secret)
+      (let [token (oauth! (assoc provider :client-id client-id :client-secret client-secret))]
+        (persist-token! secret-name api-key-env token)
+        token))))
+
+(defn- get-or-oauth! [{:keys [api-key-env] :as provider}]
   (or (not-empty (System/getenv api-key-env))
-      (let [client-id (not-empty (System/getenv client-id-env))
-            client-secret (not-empty (System/getenv client-secret-env))]
-        (when (and client-id client-secret)
-          (let [token (oauth! (assoc provider :client-id client-id :client-secret client-secret))]
-            (persist-token! secret-name api-key-env token)
-            token)))))
+      (do-oauth! provider)))
 
 (defn secrets [& [_work-dir]]
   (let [todoist-key (get-or-oauth! todoist-provider)
         linear-key (get-or-oauth! linear-provider)]
     (when-not (and todoist-key linear-key)
-      (.println *err* "Missing credentials.")
-      (.println *err* "Set $todoist_api_key and $linear_api_key env vars,")
-      (.println *err* "or set OAuth client credentials ($todoist_client_id/$todoist_client_secret, $linear_client_id/$linear_client_secret).")
+      (err! "Missing credentials.")
+      (err! "Set $todoist_api_key and $linear_api_key env vars,")
+      (err! "or set OAuth client credentials ($todoist_client_id/$todoist_client_secret, $linear_client_id/$linear_client_secret).")
       (System/exit 1))
     {:todoist {:api-key todoist-key}
      :linear {:api-key linear-key}}))
@@ -214,6 +227,9 @@
             {:is-labelled (str/includes? (str/lower-case result) "true")
              :reason ""}))))))
 
+(defn- auth-error? [status]
+  (contains? #{401 403} status))
+
 ;; Linear GraphQL Integration
 (defn query-linear! [api-key query]
   (try
@@ -223,10 +239,13 @@
                               :body (json/generate-string {:query query})})]
       (if (= 200 (:status response))
         (json/parse-string (:body response) true)
-        (do (println "Linear API error:" (:status response) (:body response))
-            (System/exit 1))))
+        (if (auth-error? (:status response))
+          (throw (ex-info "Linear auth expired" {:type :auth-expired :provider :linear :status (:status response)}))
+          (do (err! "Linear API error: " (:status response) " " (:body response))
+              (System/exit 1)))))
+    (catch clojure.lang.ExceptionInfo e (throw e))
     (catch Exception e
-      (println "Failed to connect to Linear API:" (.getMessage e))
+      (err! "Failed to connect to Linear API: " (.getMessage e))
       (System/exit 1))))
 
 (def assigned-issues-query
@@ -250,16 +269,28 @@
                                :form encoded})]
       (if (< (:status response) 400)
         (json/parse-string (:body response) true)
-        (do (println "Todoist API error:" (:status response) (:body response))
-            (System/exit 1))))
+        (if (auth-error? (:status response))
+          (throw (ex-info "Todoist auth expired" {:type :auth-expired :provider :todoist :status (:status response)}))
+          (do (err! "Todoist API error: " (:status response) " " (:body response))
+              (System/exit 1)))))
+    (catch clojure.lang.ExceptionInfo e (throw e))
     (catch Exception e
-      (println "Failed to connect to Todoist API:" (.getMessage e))
+      (err! "Failed to connect to Todoist API: " (.getMessage e))
       (System/exit 1))))
 
 (defn fetch-rest-todoist! [api-key endpoint]
   (let [response (http/get (str "https://api.todoist.com/api/v1/" endpoint)
-                          {:headers {"Authorization" (str "Bearer " api-key)}})]
-    (json/parse-string (:body response) true)))
+                          {:headers {"Authorization" (str "Bearer " api-key)}
+                           :throw false})
+        status (:status response)]
+    (cond
+      (auth-error? status)
+      (throw (ex-info "Todoist auth expired" {:type :auth-expired :provider :todoist :status status}))
+      (>= status 400)
+      (do (err! "Todoist API error: " status " " (:body response))
+          (System/exit 1))
+      :else
+      (json/parse-string (:body response) true))))
 
 (defn fetch-todoist-items! [api-key]
   (let [result (sync-todoist! api-key {:params {:sync_token "*" :resource_types ["items"]}})
@@ -439,11 +470,7 @@
     (concat issue-cmds reassignment-cmds)))
 
 (defn format-evaluation-result [is-labelled? labels reason]
-  (let [green "\033[32m"
-        red "\033[31m"
-        grey "\033[90m"
-        reset "\033[0m"
-        status (if is-labelled?
+  (let [status (if is-labelled?
                  (str green "✓ " (str/join "/" labels) reset)
                  (str red "✗ skip" reset))
         reason-str (when (seq reason)
@@ -480,8 +507,6 @@
                 issue-id (extract-issue-id (:description task))
                 raw-issue (get raw-issues-by-id issue-id)
                 task-title (subs (:content task) 0 (min 50 (count (:content task))))
-                cyan "\033[36m"
-                reset "\033[0m"
                 progress-str (str cyan "[" (inc processed) "/" (count eligible-tasks) "]" reset)
                 evaluation (evaluate-task-with-llm task raw-issue llm)]
             (print (str progress-str " " task-title "... "))
@@ -499,71 +524,95 @@
   [spec]
   (cli/format-opts (merge spec {:order (vec (keys (:spec spec)))})))
 
+(defn- reauth-provider! [provider-key]
+  (let [provider (case provider-key
+                   :todoist todoist-provider
+                   :linear linear-provider)]
+    (println (str "\n" (:name provider) " token expired. Re-authenticating..."))
+    (or (do-oauth! provider)
+        (do (err! (:name provider) " token expired and no OAuth credentials available to re-authenticate.")
+            (err! "Set $" (:client-id-env provider) " and $" (:client-secret-env provider) ", or run `bb auth`.")
+            (System/exit 1)))))
+
+(defn- with-reauth [secrets-config body-fn]
+  (loop [current-secrets secrets-config
+         retried #{}]
+    (let [result (try
+                   {:ok (body-fn current-secrets)}
+                   (catch clojure.lang.ExceptionInfo e
+                     (if (= :auth-expired (:type (ex-data e)))
+                       {:auth-expired (:provider (ex-data e))}
+                       (throw e))))]
+      (if-let [provider-key (:auth-expired result)]
+        (if (contains? retried provider-key)
+          (throw (ex-info (str "Re-authentication failed for " (name provider-key)) {:provider provider-key}))
+          (let [new-token (reauth-provider! provider-key)]
+            (recur (assoc-in current-secrets [provider-key :api-key] new-token)
+                   (conj retried provider-key))))
+        (:ok result)))))
+
 (defn run-sync! [opts]
   (let [skip-llm? (:skip-llm opts)
         dry-run? (:dry-run opts)
         verbose? (:verbose opts)
         work-dir (:work-dir opts)
         secrets-config (secrets work-dir)
-        app-config (config work-dir)
-        {:keys [linear todoist]} secrets-config
-        raw-issues (assigned-issues (:api-key linear))
-        issues (expand-issues raw-issues)
-        tasks (fetch-todoist-items! (:api-key todoist))
-        projects (fetch-todoist-projects! (:api-key todoist))
-        project-id (find-project-id projects (get-in app-config [:todoist :project-name]))
-        sync-cmds (sync-commands issues tasks app-config project-id)
-        llm-cmds (if (or skip-llm? dry-run?) [] (llm-label-commands tasks issues raw-issues app-config verbose? work-dir))
-        commands (concat sync-cmds llm-cmds)]
-
-    (when verbose?
-      (println "Found" (count issues) "Linear issues")
-      (println "Found" (count tasks) "Todoist tasks"))
-    (if skip-llm?
-      (println "Generated" (count commands) "sync commands (LLM skipped)")
-      (println "Generated" (count commands) "total commands"))
-    
-    (if (seq commands)
-      (if dry-run?
-        (do (println "\nDry run - would execute" (count commands) "commands:")
-            (doseq [cmd commands]
-              (println " " (:type cmd) (:args cmd))))
-        (do (execute-todoist-commands! (:api-key todoist) commands)
-            (println "Sync completed!")))
-      (println "No changes needed."))))
+        app-config (config work-dir)]
+    (with-reauth secrets-config
+      (fn [{:keys [linear todoist]}]
+        (let [raw-issues (assigned-issues (:api-key linear))
+              issues (expand-issues raw-issues)
+              tasks (fetch-todoist-items! (:api-key todoist))
+              projects (fetch-todoist-projects! (:api-key todoist))
+              project-id (find-project-id projects (get-in app-config [:todoist :project-name]))
+              sync-cmds (sync-commands issues tasks app-config project-id)
+              llm-cmds (if (or skip-llm? dry-run?) [] (llm-label-commands tasks issues raw-issues app-config verbose? work-dir))
+              commands (concat sync-cmds llm-cmds)]
+          (when verbose?
+            (println "Found" (count issues) "Linear issues")
+            (println "Found" (count tasks) "Todoist tasks"))
+          (if skip-llm?
+            (println "Generated" (count commands) "sync commands (LLM skipped)")
+            (println "Generated" (count commands) "total commands"))
+          (if (seq commands)
+            (if dry-run?
+              (do (println "\nDry run - would execute" (count commands) "commands:")
+                  (doseq [cmd commands]
+                    (println " " (:type cmd) (:args cmd))))
+              (do (execute-todoist-commands! (:api-key todoist) commands)
+                  (println "Sync completed!")))
+            (println "No changes needed.")))))))
 
 (defn move-tagged-tasks-to-project! [opts]
   (let [dry-run? (:dry-run opts)
         verbose? (:verbose opts)
         work-dir (:work-dir opts)
         secrets-config (secrets work-dir)
-        app-config (config work-dir)
-        {:keys [todoist]} secrets-config
-        tasks (fetch-todoist-items! (:api-key todoist))
-        projects (fetch-todoist-projects! (:api-key todoist))
-        project-name (get-in app-config [:todoist :project-name])
-        project-id (find-project-id projects project-name)]
-    
-    (if-not project-id
-      (println "Error: Project" (str "\"" project-name "\"") "not found in Todoist")
-      (let [tagged-tasks (->> tasks
-                             (filter #(some #{"from-linear"} (:labels %)))
-                             (remove :checked))
-            move-commands (map #(move-item-command (:id %) project-id) tagged-tasks)]
-        
-        (when verbose?
-          (println "Found" (count tagged-tasks) "tasks with 'from-linear' label")
-          (println "Target project:" project-name "(" project-id ")"))
-        
-        (if (seq move-commands)
-          (if dry-run?
-            (do (println "Dry run - would move" (count move-commands) "tasks to" project-name)
-                (when verbose?
-                  (doseq [task tagged-tasks]
-                    (println " " (:content task)))))
-            (do (execute-todoist-commands! (:api-key todoist) move-commands)
-                (println "Moved" (count move-commands) "tasks to" project-name)))
-          (println "No tagged tasks found to move."))))))
+        app-config (config work-dir)]
+    (with-reauth secrets-config
+      (fn [{:keys [todoist]}]
+        (let [tasks (fetch-todoist-items! (:api-key todoist))
+              projects (fetch-todoist-projects! (:api-key todoist))
+              project-name (get-in app-config [:todoist :project-name])
+              project-id (find-project-id projects project-name)]
+          (if-not project-id
+            (println "Error: Project" (str "\"" project-name "\"") "not found in Todoist")
+            (let [tagged-tasks (->> tasks
+                                   (filter #(some #{"from-linear"} (:labels %)))
+                                   (remove :checked))
+                  move-commands (map #(move-item-command (:id %) project-id) tagged-tasks)]
+              (when verbose?
+                (println "Found" (count tagged-tasks) "tasks with 'from-linear' label")
+                (println "Target project:" project-name "(" project-id ")"))
+              (if (seq move-commands)
+                (if dry-run?
+                  (do (println "Dry run - would move" (count move-commands) "tasks to" project-name)
+                      (when verbose?
+                        (doseq [task tagged-tasks]
+                          (println " " (:content task)))))
+                  (do (execute-todoist-commands! (:api-key todoist) move-commands)
+                      (println "Moved" (count move-commands) "tasks to" project-name)))
+                (println "No tagged tasks found to move."))))))))
 
 (defn run-auth! [& _args]
   (let [providers (->> [todoist-provider linear-provider]
@@ -571,8 +620,8 @@
                                  (and (not-empty (System/getenv client-id-env))
                                       (not-empty (System/getenv client-secret-env))))))]
     (when (empty? providers)
-      (.println *err* "No OAuth credentials found.")
-      (.println *err* "Set $todoist_client_id/$todoist_client_secret or $linear_client_id/$linear_client_secret.")
+      (err! "No OAuth credentials found.")
+      (err! "Set $todoist_client_id/$todoist_client_secret or $linear_client_id/$linear_client_secret.")
       (System/exit 1))
     (doseq [{:keys [client-id-env client-secret-env secret-name api-key-env] :as provider} providers]
       (let [token (oauth! (assoc provider
